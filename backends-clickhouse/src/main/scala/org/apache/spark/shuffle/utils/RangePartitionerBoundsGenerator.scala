@@ -16,25 +16,26 @@
  */
 package org.apache.spark.shuffle.utils
 
-import io.glutenproject.execution.SortExecTransformer
-import io.glutenproject.expression.ExpressionConverter
-import io.glutenproject.substrait.SubstraitContext
-import io.glutenproject.substrait.expression.ExpressionNode
-import io.glutenproject.substrait.plan.{PlanBuilder, PlanNode}
-import io.glutenproject.substrait.rel.{RelBuilder, RelNode}
+import org.apache.gluten.backendsapi.clickhouse.CHValidatorApi
+import org.apache.gluten.execution.SortExecTransformer
+import org.apache.gluten.expression.ExpressionConverter
+import org.apache.gluten.substrait.SubstraitContext
+import org.apache.gluten.substrait.expression.ExpressionNode
+import org.apache.gluten.substrait.plan.{PlanBuilder, PlanNode}
+import org.apache.gluten.substrait.rel.{RelBuilder, RelNode}
 
 import org.apache.spark.RangePartitioner
 import org.apache.spark.rdd.{PartitionPruningRDD, RDD}
-import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, NamedExpression, SortOrder, UnsafeRow}
+import org.apache.spark.sql.catalyst.expressions.{Attribute, NamedExpression, SortOrder, UnsafeRow}
+import org.apache.spark.sql.catalyst.plans.physical.RangePartitioning
+import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.types._
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.node.ArrayNode
 
 import java.util
-import java.util.Base64
 
-import scala.collection.JavaConverters._
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 import scala.reflect.ClassTag
@@ -55,7 +56,7 @@ class RangePartitionerBoundsGenerator[K: Ordering: ClassTag, V](
     val samplePointsPerPartitionHint: Int = 20
 ) {
 
-  def getRangeBounds(): Array[K] = {
+  private def getRangeBounds: Array[K] = {
     if (partitions <= 1) {
       Array.empty
     } else {
@@ -94,7 +95,6 @@ class RangePartitionerBoundsGenerator[K: Ordering: ClassTag, V](
   /*
    return json structure
    {
-    "projection_plan":"xxxx",
     "ordering":[
       {
        "column_ref":0,
@@ -125,10 +125,10 @@ class RangePartitionerBoundsGenerator[K: Ordering: ClassTag, V](
       .replaceWithExpressionTransformer(ordering.child, attributes)
       .doTransform(funcs)
     val pb = projExprNode.toProtobuf
-    if (!pb.hasSelection()) {
+    if (!pb.hasSelection) {
       throw new IllegalArgumentException(s"A sorting field should be an attribute")
     } else {
-      pb.getSelection().getDirectReference().getStructField.getField()
+      pb.getSelection.getDirectReference.getStructField.getField()
     }
   }
 
@@ -152,30 +152,6 @@ class RangePartitionerBoundsGenerator[K: Ordering: ClassTag, V](
     PlanBuilder.makePlan(context, relNodes, outNames)
   }
 
-  private def buildProjectionAttributesByOrderings(
-      sortOrders: Seq[SortOrder]): (Seq[NamedExpression], Seq[SortOrder]) = {
-    val projectionAttrs = new util.ArrayList[NamedExpression]()
-    val newSortOrders = new util.ArrayList[SortOrder]()
-    var aliasNo = 0
-    sortOrders.foreach(
-      order => {
-        if (!order.child.isInstanceOf[Attribute]) {
-          val alias = new Alias(order.child, s"sort_col_$aliasNo")()
-          aliasNo += 1
-          projectionAttrs.add(alias)
-          newSortOrders.add(
-            SortOrder(
-              alias.toAttribute,
-              order.direction,
-              order.nullOrdering,
-              order.sameOrderExpressions))
-        } else {
-          newSortOrders.add(order)
-        }
-      })
-    (projectionAttrs.asScala, newSortOrders.asScala)
-  }
-
   private def buildOrderingJson(
       context: SubstraitContext,
       orderings: Seq[SortOrder],
@@ -185,14 +161,12 @@ class RangePartitionerBoundsGenerator[K: Ordering: ClassTag, V](
     orderings.foreach {
       ordering =>
         val node = jsonMapper.createObjectNode()
-        node.put("column_ref", getExpressionFieldReference(context, ordering, attributes))
+        val index = getExpressionFieldReference(context, ordering, attributes)
+        node.put("column_name", attributes(index).name)
+        node.put("column_ref", index)
         node.put("data_type", ordering.dataType.toString)
         node.put("is_nullable", ordering.nullable)
-        node.put(
-          "direction",
-          SortExecTransformer.transformSortDirection(
-            ordering.direction.sql,
-            ordering.nullOrdering.sql))
+        node.put("direction", SortExecTransformer.transformSortDirection(ordering))
         arrayNode.add(node)
     }
   }
@@ -221,8 +195,12 @@ class RangePartitionerBoundsGenerator[K: Ordering: ClassTag, V](
             case _: FloatType => node.put("value", row.getFloat(i))
             case _: DoubleType => node.put("value", row.getDouble(i))
             case _: StringType => node.put("value", row.getString(i))
-            case _: DateType => node.put("value", row.getShort(i))
-            case d =>
+            case _: DateType => node.put("value", row.getInt(i))
+            case d: DecimalType =>
+              val decimal = row.getDecimal(i, d.precision, d.scale).toString()
+              node.put("value", decimal)
+            case _: TimestampType => node.put("value", row.getLong(i))
+            case _ =>
               throw new IllegalArgumentException(
                 s"Unsupported data type ${ordering.dataType.toString}")
           }
@@ -232,38 +210,30 @@ class RangePartitionerBoundsGenerator[K: Ordering: ClassTag, V](
     arrayNode
   }
 
-  private def buildRangeBoundsJson(jsonMapper: ObjectMapper, arrayNode: ArrayNode): Unit = {
-    val bounds = getRangeBounds()
+  private def buildRangeBoundsJson(jsonMapper: ObjectMapper, arrayNode: ArrayNode): Int = {
+    val bounds = getRangeBounds
     bounds.foreach {
       bound =>
         val row = bound.asInstanceOf[UnsafeRow]
         arrayNode.add(buildRangeBoundJson(row, ordering, jsonMapper))
     }
+    bounds.length
   }
 
   // Make a json structure that can be passed to native engine
-  def getRangeBoundsJsonString(): String = {
+  def getRangeBoundsJsonString: RangeBoundsInfo = {
     val context = new SubstraitContext()
-    val (sortExpressions, newOrderings) = buildProjectionAttributesByOrderings(ordering)
-    val totalAttributes = new util.ArrayList[Attribute]()
-    inputAttributes.foreach(attr => totalAttributes.add(attr))
-    sortExpressions.foreach(expr => totalAttributes.add(expr.toAttribute))
     val mapper = new ObjectMapper
     val rootNode = mapper.createObjectNode
     val orderingArray = rootNode.putArray("ordering")
-    buildOrderingJson(context, newOrderings, totalAttributes.asScala, mapper, orderingArray)
+    buildOrderingJson(context, ordering, inputAttributes, mapper, orderingArray)
     val boundArray = rootNode.putArray("range_bounds")
-    buildRangeBoundsJson(mapper, boundArray);
-    if (sortExpressions.size != 0) {
-      // If there is any expressions in orderings, we build a projection plan and pass
-      // it to backend
-      val projectPlan = buildProjectionPlan(context, sortExpressions).toProtobuf
-      val serializeProjectPlan = Base64.getEncoder().encodeToString(projectPlan.toByteArray)
-      rootNode.put("projection_plan", serializeProjectPlan)
-    }
-    mapper.writeValueAsString(rootNode)
+    val boundLength = buildRangeBoundsJson(mapper, boundArray)
+    RangeBoundsInfo(mapper.writeValueAsString(rootNode), boundLength)
   }
 }
+
+case class RangeBoundsInfo(json: String, boundsSize: Int)
 
 object RangePartitionerBoundsGenerator {
   def supportedFieldType(dataType: DataType): Boolean = {
@@ -277,11 +247,14 @@ object RangePartitionerBoundsGenerator {
       case _: DoubleType => true
       case _: StringType => true
       case _: DateType => true
+      case _: DecimalType => true
+      case _: TimestampType => true
       case _ => false
     }
   }
 
-  def supportedOrderings(orderings: Seq[SortOrder]): Boolean = {
+  def supportedOrderings(rangePartitioning: RangePartitioning, child: SparkPlan): Boolean = {
+    val orderings = rangePartitioning.ordering
     var enableRangePartitioning = true
     // TODO. support complex data type in orderings
     breakable {
@@ -290,8 +263,11 @@ object RangePartitionerBoundsGenerator {
           enableRangePartitioning = false
           break
         }
-        // FIXME: there is a weird bug to handle expressions.
-        if (!ordering.child.isInstanceOf[Attribute]) {
+        if (
+          !ordering.child.isInstanceOf[Attribute] && !CHValidatorApi.supportShuffleWithProject(
+            rangePartitioning,
+            child)
+        ) {
           enableRangePartitioning = false
           break
         }

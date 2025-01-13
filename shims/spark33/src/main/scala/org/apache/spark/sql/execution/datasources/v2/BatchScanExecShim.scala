@@ -16,43 +16,52 @@
  */
 package org.apache.spark.sql.execution.datasources.v2
 
-import io.glutenproject.GlutenConfig
-
 import org.apache.spark.SparkException
 import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.plans.physical.KeyGroupedPartitioning
 import org.apache.spark.sql.catalyst.util.InternalRowSet
+import org.apache.spark.sql.connector.catalog.Table
+import org.apache.spark.sql.connector.expressions.aggregate.Aggregation
 import org.apache.spark.sql.connector.read.{HasPartitionKey, InputPartition, Scan, SupportsRuntimeFiltering}
 import org.apache.spark.sql.execution.datasources.DataSourceStrategy
+import org.apache.spark.sql.execution.datasources.v2.orc.OrcScan
+import org.apache.spark.sql.execution.datasources.v2.parquet.ParquetScan
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
-class BatchScanExecShim(
-    output: Seq[AttributeReference],
-    @transient scan: Scan,
-    runtimeFilters: Seq[Expression])
-  extends BatchScanExec(output, scan, runtimeFilters) {
+abstract class BatchScanExecShim(
+    override val output: Seq[AttributeReference],
+    @transient override val scan: Scan,
+    override val runtimeFilters: Seq[Expression],
+    val keyGroupedPartitioning: Option[Seq[Expression]] = None,
+    val ordering: Option[Seq[SortOrder]] = None,
+    @transient val table: Table,
+    val commonPartitionValues: Option[Seq[(InternalRow, Int)]] = None,
+    val applyPartialClustering: Boolean = false,
+    val replicatePartitions: Boolean = false)
+  extends AbstractBatchScanExec(output, scan, runtimeFilters) {
 
-  override lazy val metrics: Map[String, SQLMetric] = Map()
+  // Note: "metrics" is made transient to avoid sending driver-side metrics to tasks.
+  @transient override lazy val metrics: Map[String, SQLMetric] = Map()
 
-  override def supportsColumnar(): Boolean = GlutenConfig.getConf.enableColumnarIterator
+  lazy val metadataColumns: Seq[AttributeReference] = output.collect {
+    case FileSourceMetadataAttribute(attr) => attr
+  }
+
+  def hasUnsupportedColumns: Boolean = {
+    // TODO, fallback if user define same name column due to we can't right now
+    // detect which column is metadata column which is user defined column.
+    val metadataColumnsNames = metadataColumns.map(_.name)
+    output
+      .filterNot(metadataColumns.toSet)
+      .exists(v => metadataColumnsNames.contains(v.name))
+  }
 
   override def doExecuteColumnar(): RDD[ColumnarBatch] = {
     throw new UnsupportedOperationException("Need to implement this method")
   }
-
-  override val keyGroupedPartitioning: Option[Seq[Expression]] = Option.empty[Seq[Expression]]
-
-  override def equals(other: Any): Boolean = other match {
-    case that: BatchScanExecShim =>
-      (that.canEqual(this)) && super.equals(that)
-    case _ => false
-  }
-
-  override def hashCode(): Int = super.hashCode()
-
-  override def canEqual(other: Any): Boolean = other.isInstanceOf[BatchScanExecShim]
 
   @transient protected lazy val filteredPartitions: Seq[Seq[InputPartition]] = {
     val dataSourceFilters = runtimeFilters.flatMap {
@@ -109,4 +118,27 @@ class BatchScanExecShim(
     }
   }
 
+  @transient lazy val pushedAggregate: Option[Aggregation] = {
+    scan match {
+      case s: ParquetScan => s.pushedAggregate
+      case o: OrcScan => o.pushedAggregate
+      case _ => None
+    }
+  }
+
+  final override protected def otherCopyArgs: Seq[AnyRef] = {
+    Seq(
+      ordering,
+      table,
+      commonPartitionValues,
+      // Box boolean to match `AnyRef`
+      Boolean.box(applyPartialClustering),
+      Boolean.box(replicatePartitions))
+  }
+}
+
+abstract class ArrowBatchScanExecShim(original: BatchScanExec) extends DataSourceV2ScanExecBase {
+  @transient override lazy val inputPartitions: Seq[InputPartition] = original.inputPartitions
+
+  override def keyGroupedPartitioning: Option[Seq[Expression]] = original.keyGroupedPartitioning
 }

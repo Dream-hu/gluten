@@ -1,12 +1,17 @@
 **/target/**
 *.class
 *.iml
+.DS_Store
 
 # logs
 *.log
+**/core$
 
 # cache files
 *.cache
+
+# MacOS dir files
+.DS_Store
 
 # IDEA config files
 .idea/
@@ -16,11 +21,17 @@
 # vscode config
 .vscode
 
+# vscode scala
+.bloop
+.metals
+
+# clangd
+.clangd
+
 # Mobile Tools for Java (J2ME)
 .mtj.tmp/
 
 # Package Files #
-*.jar
 *.war
 *.ear
 
@@ -32,6 +43,7 @@ target/
 *.iml
 
 **/target/**
+**/dependency-reduced-pom.xml
 
 # logs
 *.log
@@ -40,13 +52,13 @@ thirdparty/*.tar*
 CMakeFiles/
 CMakeCache.txt
 CTestTestfile.cmake
-Makefile
 cmake_install.cmake
 build/
 *-build/
 Testing/
 cmake-build-debug/
 cmake-build-release/
+ep/_ep/
 
 # Editor temporary/working/backup files #
 .#*
@@ -62,6 +74,7 @@ scalastyle-output.xml
 
 # Generated C++ benchmark data
 backends-velox/generated-native-benchmark/
+backends-velox/spark-warehouse/
 
 # Generated C++ benchmark executables
 cpp/**/benchmarks/**/*
@@ -72,3 +85,18 @@ cpp/**/benchmarks/**/*
 cpp/**/example/**/*
 !cpp/**/example/**/
 !cpp/**/example/**/*.*
+
+/cpp-ch/ClickHouse
+/cpp-ch/cmake-build-*
+/cpp-ch/local-engine/tests/testConfig.h
+/cpp-ch/build_ch
+
+dist/
+
+/cpp-ch/local-engine/Parser/*_udf
+!/cpp-ch/local-engine/Parser/example_udf
+
+# For Hive
+metastore_db/
+
+.ipynb_checkpoints

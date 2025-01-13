@@ -18,7 +18,7 @@
 #pragma once
 
 #include "memory/ColumnarBatch.h"
-#include "memory/VeloxMemoryPool.h"
+#include "memory/VeloxMemoryManager.h"
 #include "velox/vector/ComplexVector.h"
 #include "velox/vector/arrow/Bridge.h"
 
@@ -29,23 +29,36 @@ class VeloxColumnarBatch final : public ColumnarBatch {
   VeloxColumnarBatch(facebook::velox::RowVectorPtr rowVector)
       : ColumnarBatch(rowVector->childrenSize(), rowVector->size()), rowVector_(rowVector) {}
 
-  std::string GetType() const override {
-    return "velox";
+  std::string getType() const override {
+    return kType;
   }
+
+  static std::shared_ptr<VeloxColumnarBatch> from(
+      facebook::velox::memory::MemoryPool* pool,
+      std::shared_ptr<ColumnarBatch> cb);
+
+  static std::shared_ptr<VeloxColumnarBatch> compose(
+      facebook::velox::memory::MemoryPool* pool,
+      const std::vector<std::shared_ptr<ColumnarBatch>>& batches);
+
+  int64_t numBytes() override;
 
   std::shared_ptr<ArrowSchema> exportArrowSchema() override;
   std::shared_ptr<ArrowArray> exportArrowArray() override;
-
-  void saveToFile(std::shared_ptr<ArrowWriter> writer) override;
-
+  std::vector<char> toUnsafeRow(int32_t rowId) const override;
+  std::shared_ptr<VeloxColumnarBatch> select(
+      facebook::velox::memory::MemoryPool* pool,
+      const std::vector<int32_t>& columnIndices);
   facebook::velox::RowVectorPtr getRowVector() const;
   facebook::velox::RowVectorPtr getFlattenedRowVector();
 
  private:
-  void EnsureFlattened();
+  void ensureFlattened();
 
   facebook::velox::RowVectorPtr rowVector_ = nullptr;
-  facebook::velox::RowVectorPtr flattened_ = nullptr;
+  bool flattened_ = false;
+
+  inline static const std::string kType{"velox"};
 };
 
 } // namespace gluten

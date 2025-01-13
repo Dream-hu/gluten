@@ -16,13 +16,13 @@
  */
 
 #include "ResultIterator.h"
-#include "Backend.h"
+#include "Runtime.h"
 
 namespace gluten {
 
-std::shared_ptr<Metrics> ResultIterator::GetMetrics() {
-  if (backend_) {
-    return backend_->GetMetrics(raw_iter_, exportNanos_);
+Metrics* ResultIterator::getMetrics() {
+  if (runtime_) {
+    return runtime_->getMetrics(getInputIter(), exportNanos_);
   }
   return nullptr;
 }

@@ -17,169 +17,186 @@
 
 #include "MemoryAllocator.h"
 #include "HbwAllocator.h"
+#include "utils/Macros.h"
 
 namespace gluten {
 
-bool ListenableMemoryAllocator::Allocate(int64_t size, void** out) {
-  listener_->AllocationChanged(size);
-  bool succeed = delegated_->Allocate(size, out);
+bool ListenableMemoryAllocator::allocate(int64_t size, void** out) {
+  updateUsage(size);
+  bool succeed = delegated_->allocate(size, out);
   if (!succeed) {
-    listener_->AllocationChanged(-size);
-  }
-  if (succeed) {
-    bytes_ += size;
+    updateUsage(-size);
   }
   return succeed;
 }
 
-bool ListenableMemoryAllocator::AllocateZeroFilled(int64_t nmemb, int64_t size, void** out) {
-  listener_->AllocationChanged(size * nmemb);
-  bool succeed = delegated_->AllocateZeroFilled(nmemb, size, out);
+bool ListenableMemoryAllocator::allocateZeroFilled(int64_t nmemb, int64_t size, void** out) {
+  updateUsage(size * nmemb);
+  bool succeed = delegated_->allocateZeroFilled(nmemb, size, out);
   if (!succeed) {
-    listener_->AllocationChanged(-size * nmemb);
-  }
-  if (succeed) {
-    bytes_ += size * nmemb;
+    updateUsage(-size * nmemb);
   }
   return succeed;
 }
 
-bool ListenableMemoryAllocator::AllocateAligned(uint16_t alignment, int64_t size, void** out) {
-  listener_->AllocationChanged(size);
-  bool succeed = delegated_->AllocateAligned(alignment, size, out);
+bool ListenableMemoryAllocator::allocateAligned(uint64_t alignment, int64_t size, void** out) {
+  updateUsage(size);
+  bool succeed = delegated_->allocateAligned(alignment, size, out);
   if (!succeed) {
-    listener_->AllocationChanged(-size);
-  }
-  if (succeed) {
-    bytes_ += size;
+    updateUsage(-size);
   }
   return succeed;
 }
 
-bool ListenableMemoryAllocator::Reallocate(void* p, int64_t size, int64_t new_size, void** out) {
-  int64_t diff = new_size - size;
-  listener_->AllocationChanged(diff);
-  bool succeed = delegated_->Reallocate(p, size, new_size, out);
-  if (!succeed) {
-    listener_->AllocationChanged(-diff);
+bool ListenableMemoryAllocator::reallocate(void* p, int64_t size, int64_t newSize, void** out) {
+  int64_t diff = newSize - size;
+  if (diff >= 0) {
+    updateUsage(diff);
+    bool succeed = delegated_->reallocate(p, size, newSize, out);
+    if (!succeed) {
+      updateUsage(-diff);
+    }
+    return succeed;
+  } else {
+    bool succeed = delegated_->reallocate(p, size, newSize, out);
+    if (succeed) {
+      updateUsage(diff);
+    }
+    return succeed;
   }
-  if (succeed) {
-    bytes_ += diff;
-  }
-  return succeed;
 }
 
-bool ListenableMemoryAllocator::ReallocateAligned(
+bool ListenableMemoryAllocator::reallocateAligned(
     void* p,
-    uint16_t alignment,
+    uint64_t alignment,
     int64_t size,
-    int64_t new_size,
+    int64_t newSize,
     void** out) {
-  int64_t diff = new_size - size;
-  listener_->AllocationChanged(diff);
-  bool succeed = delegated_->ReallocateAligned(p, alignment, size, new_size, out);
-  if (!succeed) {
-    listener_->AllocationChanged(-diff);
+  int64_t diff = newSize - size;
+  if (diff >= 0) {
+    updateUsage(diff);
+    bool succeed = delegated_->reallocateAligned(p, alignment, size, newSize, out);
+    if (!succeed) {
+      updateUsage(-diff);
+    }
+    return succeed;
+  } else {
+    bool succeed = delegated_->reallocateAligned(p, alignment, size, newSize, out);
+    if (succeed) {
+      updateUsage(diff);
+    }
+    return succeed;
   }
+}
+
+bool ListenableMemoryAllocator::free(void* p, int64_t size) {
+  bool succeed = delegated_->free(p, size);
   if (succeed) {
-    bytes_ += diff;
+    updateUsage(-size);
   }
   return succeed;
 }
 
-bool ListenableMemoryAllocator::Free(void* p, int64_t size) {
-  listener_->AllocationChanged(-size);
-  bool succeed = delegated_->Free(p, size);
-  if (!succeed) {
-    listener_->AllocationChanged(size);
-  }
-  if (succeed) {
-    bytes_ -= size;
-  }
-  return succeed;
+int64_t ListenableMemoryAllocator::getBytes() const {
+  return usedBytes_;
 }
 
-int64_t ListenableMemoryAllocator::GetBytes() const {
-  return bytes_;
+int64_t ListenableMemoryAllocator::peakBytes() const {
+  return peakBytes_;
 }
 
-bool StdMemoryAllocator::Allocate(int64_t size, void** out) {
+void ListenableMemoryAllocator::updateUsage(int64_t size) {
+  listener_->allocationChanged(size);
+  usedBytes_ += size;
+  while (true) {
+    int64_t savedPeakBytes = peakBytes_;
+    if (usedBytes_ <= savedPeakBytes) {
+      break;
+    }
+    // usedBytes_ > savedPeakBytes, update peak
+    if (peakBytes_.compare_exchange_weak(savedPeakBytes, usedBytes_)) {
+      break;
+    }
+  }
+}
+
+bool StdMemoryAllocator::allocate(int64_t size, void** out) {
   *out = std::malloc(size);
+  if (*out == nullptr) {
+    return false;
+  }
   bytes_ += size;
   return true;
 }
 
-bool StdMemoryAllocator::AllocateZeroFilled(int64_t nmemb, int64_t size, void** out) {
+bool StdMemoryAllocator::allocateZeroFilled(int64_t nmemb, int64_t size, void** out) {
   *out = std::calloc(nmemb, size);
+  if (*out == nullptr) {
+    return false;
+  }
   bytes_ += size;
   return true;
 }
 
-bool StdMemoryAllocator::AllocateAligned(uint16_t alignment, int64_t size, void** out) {
+bool StdMemoryAllocator::allocateAligned(uint64_t alignment, int64_t size, void** out) {
   *out = aligned_alloc(alignment, size);
+  if (*out == nullptr) {
+    return false;
+  }
   bytes_ += size;
   return true;
 }
 
-bool StdMemoryAllocator::Reallocate(void* p, int64_t size, int64_t new_size, void** out) {
-  *out = std::realloc(p, new_size);
-  bytes_ += (new_size - size);
+bool StdMemoryAllocator::reallocate(void* p, int64_t size, int64_t newSize, void** out) {
+  *out = std::realloc(p, newSize);
+  if (*out == nullptr) {
+    return false;
+  }
+  bytes_ += (newSize - size);
   return true;
 }
 
-bool StdMemoryAllocator::ReallocateAligned(void* p, uint16_t alignment, int64_t size, int64_t new_size, void** out) {
-  if (new_size <= 0) {
+bool StdMemoryAllocator::reallocateAligned(void* p, uint64_t alignment, int64_t size, int64_t newSize, void** out) {
+  GLUTEN_CHECK(p != nullptr, "reallocate with nullptr");
+  if (newSize <= 0) {
     return false;
   }
-  void* reallocated_p = std::realloc(p, new_size);
-  if (!reallocated_p) {
+  if (newSize <= size) {
+    auto aligned = ROUND_TO_LINE(newSize, alignment);
+    if (aligned <= size) {
+      // shrink-to-fit
+      return reallocate(p, size, aligned, out);
+    }
+  }
+  void* reallocatedP = std::aligned_alloc(alignment, newSize);
+  if (reallocatedP == nullptr) {
     return false;
   }
-  memcpy(reallocated_p, p, std::min(size, new_size));
-  bytes_ += (new_size - size);
+  memcpy(reallocatedP, p, std::min(size, newSize));
+  std::free(p);
+  *out = reallocatedP;
+  bytes_ += (newSize - size);
   return true;
 }
 
-bool StdMemoryAllocator::Free(void* p, int64_t size) {
+bool StdMemoryAllocator::free(void* p, int64_t size) {
+  GLUTEN_CHECK(p != nullptr, "free with nullptr");
   std::free(p);
   bytes_ -= size;
   return true;
 }
 
-int64_t StdMemoryAllocator::GetBytes() const {
+int64_t StdMemoryAllocator::getBytes() const {
   return bytes_;
 }
 
-arrow::Status WrappedArrowMemoryPool::Allocate(int64_t size, uint8_t** out) {
-  if (!allocator_->Allocate(size, reinterpret_cast<void**>(out))) {
-    return arrow::Status::Invalid("WrappedMemoryPool: Error allocating " + std::to_string(size) + " bytes");
-  }
-  return arrow::Status::OK();
+int64_t StdMemoryAllocator::peakBytes() const {
+  return 0;
 }
 
-arrow::Status WrappedArrowMemoryPool::Reallocate(int64_t old_size, int64_t new_size, uint8_t** ptr) {
-  if (!allocator_->Reallocate(*ptr, old_size, new_size, reinterpret_cast<void**>(ptr))) {
-    return arrow::Status::Invalid("WrappedMemoryPool: Error reallocating " + std::to_string(new_size) + " bytes");
-  }
-  return arrow::Status::OK();
-}
-
-void WrappedArrowMemoryPool::Free(uint8_t* buffer, int64_t size) {
-  allocator_->Free(buffer, size);
-}
-
-int64_t WrappedArrowMemoryPool::bytes_allocated() const {
-  // fixme use self accountant
-  return allocator_->GetBytes();
-}
-
-std::string WrappedArrowMemoryPool::backend_name() const {
-  return "gluten allocator";
-}
-
-std::shared_ptr<MemoryAllocator> DefaultMemoryAllocator() {
+std::shared_ptr<MemoryAllocator> defaultMemoryAllocator() {
 #if defined(GLUTEN_ENABLE_HBM)
-  static std::shared_ptr<MemoryAllocator> alloc = std::make_shared<HbwMemoryAllocator>();
+  static std::shared_ptr<MemoryAllocator> alloc = HbwMemoryAllocator::newInstance();
 #else
   static std::shared_ptr<MemoryAllocator> alloc = std::make_shared<StdMemoryAllocator>();
 #endif

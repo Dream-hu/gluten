@@ -19,39 +19,39 @@
 
 #include <memory>
 
+#include "arrow/c/bridge.h"
 #include "arrow/c/helpers.h"
 #include "arrow/record_batch.h"
-#include "include/arrow/c/bridge.h"
-#include "operators/writer/ArrowWriter.h"
-#include "utils/exception.h"
+#include "memory/MemoryManager.h"
+#include "utils/ArrowStatus.h"
+#include "utils/Exception.h"
 
 namespace gluten {
 
 class ColumnarBatch {
  public:
-  ColumnarBatch(int32_t numColumns, int32_t numRows) : numColumns_(numColumns), numRows_(numRows), exportNanos_(0) {}
+  ColumnarBatch(int32_t numColumns, int32_t numRows);
 
   virtual ~ColumnarBatch() = default;
 
-  int32_t GetNumColumns() const {
-    return numColumns_;
-  }
+  int32_t numColumns() const;
 
-  int32_t GetNumRows() const {
-    return numRows_;
-  }
+  int32_t numRows() const;
 
-  virtual std::string GetType() const = 0;
+  virtual std::string getType() const = 0;
+
+  virtual int64_t numBytes() = 0;
 
   virtual std::shared_ptr<ArrowArray> exportArrowArray() = 0;
 
   virtual std::shared_ptr<ArrowSchema> exportArrowSchema() = 0;
 
-  virtual void saveToFile(std::shared_ptr<ArrowWriter> writer) = 0;
+  virtual int64_t getExportNanos() const;
 
-  virtual int64_t getExportNanos() const {
-    return exportNanos_;
-  };
+  // Serializes one single row to byte array that can be accessed as Spark-compatible unsafe row.
+  virtual std::vector<char> toUnsafeRow(int32_t rowId) const;
+
+  friend std::ostream& operator<<(std::ostream& os, const ColumnarBatch& columnarBatch);
 
  private:
   int32_t numColumns_;
@@ -63,29 +63,19 @@ class ColumnarBatch {
 
 class ArrowColumnarBatch final : public ColumnarBatch {
  public:
-  explicit ArrowColumnarBatch(std::shared_ptr<arrow::RecordBatch> batch)
-      : ColumnarBatch(batch->num_columns(), batch->num_rows()), batch_(std::move(batch)) {}
+  explicit ArrowColumnarBatch(std::shared_ptr<arrow::RecordBatch> batch);
 
-  std::string GetType() const override {
-    return "arrow";
-  }
+  std::string getType() const override;
 
-  std::shared_ptr<ArrowSchema> exportArrowSchema() override {
-    auto c_schema = std::make_shared<ArrowSchema>();
-    GLUTEN_THROW_NOT_OK(arrow::ExportSchema(*batch_->schema(), c_schema.get()));
-    return c_schema;
-  }
+  int64_t numBytes() override;
 
-  std::shared_ptr<ArrowArray> exportArrowArray() override {
-    auto c_array = std::make_shared<ArrowArray>();
-    GLUTEN_THROW_NOT_OK(arrow::ExportRecordBatch(*batch_, c_array.get()));
-    return c_array;
-  }
+  arrow::RecordBatch* getRecordBatch() const;
 
-  void saveToFile(std::shared_ptr<ArrowWriter> writer) override {
-    writer->initWriter(*(batch_->schema().get()));
-    writer->writeInBatches(batch_);
-  }
+  std::shared_ptr<ArrowSchema> exportArrowSchema() override;
+
+  std::shared_ptr<ArrowArray> exportArrowArray() override;
+
+  std::vector<char> toUnsafeRow(int32_t rowId) const override;
 
  private:
   std::shared_ptr<arrow::RecordBatch> batch_;
@@ -93,43 +83,25 @@ class ArrowColumnarBatch final : public ColumnarBatch {
 
 class ArrowCStructColumnarBatch final : public ColumnarBatch {
  public:
-  ArrowCStructColumnarBatch(std::unique_ptr<ArrowSchema> cSchema, std::unique_ptr<ArrowArray> cArray)
-      : ColumnarBatch(cArray->n_children, cArray->length) {
-    ArrowSchemaMove(cSchema.get(), cSchema_.get());
-    ArrowArrayMove(cArray.get(), cArray_.get());
-  }
+  ArrowCStructColumnarBatch(std::unique_ptr<ArrowSchema> cSchema, std::unique_ptr<ArrowArray> cArray);
 
-  ~ArrowCStructColumnarBatch() override {
-    ArrowSchemaRelease(cSchema_.get());
-    ArrowArrayRelease(cArray_.get());
-  }
+  ~ArrowCStructColumnarBatch() override;
 
-  std::string GetType() const override {
-    return "arrow_array";
-  }
+  std::string getType() const override;
 
-  std::shared_ptr<ArrowSchema> exportArrowSchema() override {
-    return cSchema_;
-  }
+  int64_t numBytes() override;
 
-  std::shared_ptr<ArrowArray> exportArrowArray() override {
-    return cArray_;
-  }
+  std::shared_ptr<ArrowSchema> exportArrowSchema() override;
 
-  void saveToFile(std::shared_ptr<ArrowWriter> writer) override {
-    GLUTEN_ASSIGN_OR_THROW(auto rb, arrow::ImportRecordBatch(cArray_.get(), cSchema_.get()));
-    writer->initWriter(*(rb->schema().get()));
-    writer->writeInBatches(rb);
+  std::shared_ptr<ArrowArray> exportArrowArray() override;
 
-    arrow::Status status = arrow::ExportRecordBatch(*rb, cArray_.get(), cSchema_.get());
-    if (!status.ok()) {
-      throw std::runtime_error("Failed to export from Arrow record batch");
-    }
-  }
+  std::vector<char> toUnsafeRow(int32_t rowId) const override;
 
  private:
   std::shared_ptr<ArrowSchema> cSchema_ = std::make_shared<ArrowSchema>();
   std::shared_ptr<ArrowArray> cArray_ = std::make_shared<ArrowArray>();
 };
+
+std::shared_ptr<ColumnarBatch> createZeroColumnBatch(int32_t numRows);
 
 } // namespace gluten

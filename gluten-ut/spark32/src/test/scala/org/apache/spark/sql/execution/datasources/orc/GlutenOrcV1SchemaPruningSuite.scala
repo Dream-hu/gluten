@@ -14,10 +14,33 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.spark.sql.execution.datasources.orc
 
-import org.apache.spark.sql.GlutenSQLTestsBaseTrait
+import org.apache.gluten.execution.FileSourceScanExecTransformer
 
+import org.apache.spark.sql.{DataFrame, GlutenSQLTestsBaseTrait}
+import org.apache.spark.sql.catalyst.parser.CatalystSqlParser
+import org.apache.spark.sql.execution.FileSourceScanExec
+import org.apache.spark.tags.ExtendedSQLTest
+
+@ExtendedSQLTest
 class GlutenOrcV1SchemaPruningSuite extends OrcV1SchemaPruningSuite with GlutenSQLTestsBaseTrait {
+  override def checkScanSchemata(df: DataFrame, expectedSchemaCatalogStrings: String*): Unit = {
+    val fileSourceScanSchemata =
+      collect(df.queryExecution.executedPlan) {
+        case scan: FileSourceScanExec => scan.requiredSchema
+        case scan: FileSourceScanExecTransformer => scan.requiredSchema
+      }
+    assert(
+      fileSourceScanSchemata.size === expectedSchemaCatalogStrings.size,
+      s"Found ${fileSourceScanSchemata.size} file sources in dataframe, " +
+        s"but expected $expectedSchemaCatalogStrings"
+    )
+    fileSourceScanSchemata.zip(expectedSchemaCatalogStrings).foreach {
+      case (scanSchema, expectedScanSchemaCatalogString) =>
+        val expectedScanSchema = CatalystSqlParser.parseDataType(expectedScanSchemaCatalogString)
+        implicit val equality = schemaEquality
+        assert(scanSchema === expectedScanSchema)
+    }
+  }
 }

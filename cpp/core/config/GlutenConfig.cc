@@ -15,43 +15,52 @@
  * limitations under the License.
  */
 
+#include <boost/regex.hpp>
 #include <jni.h>
-
+#include <optional>
 #include "compute/ProtobufUtils.h"
-#include "jni/JniErrors.h"
-#include "substrait/plan.pb.h"
+#include "config.pb.h"
+#include "jni/JniError.h"
+
+namespace {
+
+std::optional<boost::regex> getRedactionRegex(const std::unordered_map<std::string, std::string>& conf) {
+  auto it = conf.find(gluten::kSparkRedactionRegex);
+  if (it != conf.end()) {
+    return boost::regex(it->second);
+  }
+  return std::nullopt;
+}
+} // namespace
 
 namespace gluten {
-std::unordered_map<std::string, std::string> getConfMap(JNIEnv* env, jbyteArray planArray) {
-  std::unordered_map<std::string, std::string> sparkConfs;
-  auto planData = reinterpret_cast<const uint8_t*>(env->GetByteArrayElements(planArray, 0));
-  auto planSize = env->GetArrayLength(planArray);
-  ::substrait::Plan subPlan;
-  gluten::ParseProtobuf(planData, planSize, &subPlan);
 
-  if (subPlan.has_advanced_extensions()) {
-    auto extension = subPlan.advanced_extensions();
-    if (extension.has_enhancement()) {
-      const auto& enhancement = extension.enhancement();
-      ::substrait::Expression expression;
-      if (!enhancement.UnpackTo(&expression)) {
-        std::string error_message =
-            "Can't Unapck the Any object to Expression Literal when passing the spark conf to velox";
-        gluten::JniThrow(error_message);
-      }
-      if (expression.has_literal()) {
-        auto literal = expression.literal();
-        if (literal.has_map()) {
-          auto literal_map = literal.map();
-          auto size = literal_map.key_values_size();
-          for (auto i = 0; i < size; i++) {
-            ::substrait::Expression_Literal_Map_KeyValue keyValue = literal_map.key_values(i);
-            sparkConfs.emplace(keyValue.key().string(), keyValue.value().string());
-          }
-        }
-      }
-    }
+std::unordered_map<std::string, std::string>
+parseConfMap(JNIEnv* env, const uint8_t* planData, const int32_t planDataLength) {
+  std::unordered_map<std::string, std::string> sparkConfs;
+  ConfigMap pConfigMap;
+  gluten::parseProtobuf(planData, planDataLength, &pConfigMap);
+  for (const auto& pair : pConfigMap.configs()) {
+    sparkConfs.emplace(pair.first, pair.second);
   }
+
   return sparkConfs;
 }
+
+std::string printConfig(const std::unordered_map<std::string, std::string>& conf) {
+  std::ostringstream oss;
+  oss << std::endl;
+
+  auto redactionRegex = getRedactionRegex(conf);
+
+  for (const auto& [k, v] : conf) {
+    if (redactionRegex && boost::regex_match(k, *redactionRegex)) {
+      oss << " [" << k << ", " << kSparkRedactionString << "]\n";
+    } else {
+      oss << " [" << k << ", " << v << "]\n";
+    }
+  }
+  return oss.str();
+}
+
 } // namespace gluten

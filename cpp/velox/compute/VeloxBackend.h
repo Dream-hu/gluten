@@ -22,123 +22,79 @@
 #include <boost/uuid/uuid_generators.hpp>
 #include <boost/uuid/uuid_io.hpp>
 #include <folly/executors/IOThreadPoolExecutor.h>
+#include <filesystem>
 
-#include "VeloxColumnarToRowConverter.h"
-#include "WholeStageResultIterator.h"
-#include "compute/Backend.h"
+#include "velox/common/caching/AsyncDataCache.h"
+#include "velox/common/config/Config.h"
+#include "velox/common/memory/MemoryPool.h"
+#include "velox/common/memory/MmapAllocator.h"
 
 namespace gluten {
-
-class VeloxInitializer {
+// This kind string must be same with VeloxBackend#name in java side.
+inline static const std::string kVeloxBackendKind{"velox"};
+/// As a static instance in per executor, initialized at executor startup.
+/// Should not put heavily work here.
+class VeloxBackend {
  public:
-  VeloxInitializer(const std::unordered_map<std::string, std::string>& conf) {
-    Init(conf);
-  }
-  ~VeloxInitializer() {
-    if (dynamic_cast<facebook::velox::cache::AsyncDataCache*>(mappedMemory_.get())) {
-      std::cout << mappedMemory_->toString() << std::endl;
+  ~VeloxBackend() {
+    if (dynamic_cast<facebook::velox::cache::AsyncDataCache*>(asyncDataCache_.get())) {
+      LOG(INFO) << asyncDataCache_->toString();
+      for (const auto& entry : std::filesystem::directory_iterator(cachePathPrefix_)) {
+        if (entry.path().filename().string().find(cacheFilePrefix_) != std::string::npos) {
+          LOG(INFO) << "Removing cache file " << entry.path().filename().string();
+          std::filesystem::remove(cachePathPrefix_ + "/" + entry.path().filename().string());
+        }
+      }
+      asyncDataCache_->shutdown();
     }
   }
-  void Init(std::unordered_map<std::string, std::string> conf);
 
-  void InitCache();
+  static void create(const std::unordered_map<std::string, std::string>& conf);
 
-  std::string genUuid() {
-    return boost::lexical_cast<std::string>(boost::uuids::random_generator()());
-  }
-  // Instance of AsyncDataCache used for all large allocations.
-  std::shared_ptr<facebook::velox::memory::MemoryAllocator> mappedMemory_;
-  std::unique_ptr<folly::IOThreadPoolExecutor> cacheExecutor_;
-  std::unique_ptr<folly::IOThreadPoolExecutor> ioExecutor_;
-  const std::string kVeloxCacheEnabled = "spark.gluten.sql.columnar.backend.velox.cacheEnabled";
-  const std::string kVeloxCachePath = "spark.gluten.sql.columnar.backend.velox.cachePath";
-  const std::string kVeloxCachePathDefault = "/tmp/";
-  const std::string kVeloxCacheSize = "spark.gluten.sql.columnar.backend.velox.cacheSize";
-  const std::string kVeloxCacheSizeDefault = "1073741824";
-  const std::string kVeloxCacheShards = "spark.gluten.sql.columnar.backend.velox.cacheShards";
-  const std::string kVeloxCacheShardsDefault = "1";
-  const std::string kVeloxCacheIOThreads = "spark.gluten.sql.columnar.backend.velox.cacheIOTHreads";
-  const std::string kVeloxCacheIOThreadsDefault = "1";
-};
+  static VeloxBackend* get();
 
-// This class is used to convert the Substrait plan into Velox plan.
-class VeloxBackend final : public Backend {
- public:
-  VeloxBackend(const std::unordered_map<std::string, std::string>& confMap) : Backend(confMap) {}
+  facebook::velox::cache::AsyncDataCache* getAsyncDataCache() const;
 
-  std::shared_ptr<ResultIterator> GetResultIterator(
-      MemoryAllocator* allocator,
-      std::vector<std::shared_ptr<ResultIterator>> inputs = {},
-      std::unordered_map<std::string, std::string> sessionConf = {}) override;
-
-  // Used by unit test and benchmark.
-  std::shared_ptr<ResultIterator> GetResultIterator(
-      MemoryAllocator* allocator,
-      const std::vector<std::shared_ptr<facebook::velox::substrait::SplitInfo>>& scanInfos,
-      std::unordered_map<std::string, std::string> sessionConf = {});
-
-  arrow::Result<std::shared_ptr<ColumnarToRowConverter>> getColumnar2RowConverter(
-      MemoryAllocator* allocator,
-      std::shared_ptr<ColumnarBatch> cb) override;
-
-  /// Separate the scan ids and stream ids, and get the scan infos.
-  void getInfoAndIds(
-      std::unordered_map<facebook::velox::core::PlanNodeId, std::shared_ptr<facebook::velox::substrait::SplitInfo>>
-          splitInfoMap,
-      std::unordered_set<facebook::velox::core::PlanNodeId> leafPlanNodeIds,
-      std::vector<std::shared_ptr<facebook::velox::substrait::SplitInfo>>& scanInfos,
-      std::vector<facebook::velox::core::PlanNodeId>& scanIds,
-      std::vector<facebook::velox::core::PlanNodeId>& streamIds);
-
-  std::shared_ptr<Metrics> GetMetrics(void* raw_iter, int64_t exportNanos) override {
-    auto iter = static_cast<WholeStageResultIterator*>(raw_iter);
-    return iter->GetMetrics(exportNanos);
+  std::shared_ptr<facebook::velox::config::ConfigBase> getBackendConf() const {
+    return backendConf_;
   }
 
-  std::shared_ptr<arrow::Schema> GetOutputSchema() override;
+  void tearDown() {
+    // Destruct IOThreadPoolExecutor will join all threads.
+    // On threads exit, thread local variables can be constructed with referencing global variables.
+    // So, we need to destruct IOThreadPoolExecutor and stop the threads before global variables get destructed.
+    ioExecutor_.reset();
+  }
 
  private:
-  void setInputPlanNode(const ::substrait::FetchRel& fetchRel);
+  explicit VeloxBackend(const std::unordered_map<std::string, std::string>& conf) {
+    init(conf);
+  }
 
-  void setInputPlanNode(const ::substrait::ExpandRel& sExpand);
+  void init(const std::unordered_map<std::string, std::string>& conf);
+  void initCache();
+  void initConnector();
+  void initUdf();
 
-  void setInputPlanNode(const ::substrait::SortRel& sSort);
+  void initJolFilesystem();
 
-  void setInputPlanNode(const ::substrait::WindowRel& s);
+  std::string getCacheFilePrefix() {
+    return "cache." + boost::lexical_cast<std::string>(boost::uuids::random_generator()()) + ".";
+  }
 
-  void setInputPlanNode(const ::substrait::AggregateRel& sagg);
+  static std::unique_ptr<VeloxBackend> instance_;
 
-  void setInputPlanNode(const ::substrait::ProjectRel& sproject);
+  // Instance of AsyncDataCache used for all large allocations.
+  std::shared_ptr<facebook::velox::cache::AsyncDataCache> asyncDataCache_;
 
-  void setInputPlanNode(const ::substrait::FilterRel& sfilter);
+  std::unique_ptr<folly::IOThreadPoolExecutor> ssdCacheExecutor_;
+  std::unique_ptr<folly::IOThreadPoolExecutor> ioExecutor_;
+  std::shared_ptr<facebook::velox::memory::MmapAllocator> cacheAllocator_;
 
-  void setInputPlanNode(const ::substrait::JoinRel& sJoin);
+  std::string cachePathPrefix_;
+  std::string cacheFilePrefix_;
 
-  void setInputPlanNode(const ::substrait::ReadRel& sread);
-
-  void setInputPlanNode(const ::substrait::Rel& srel);
-
-  void setInputPlanNode(const ::substrait::RelRoot& sroot);
-
-  std::shared_ptr<const facebook::velox::core::PlanNode> getVeloxPlanNode(const ::substrait::Plan& splan);
-
-  std::string nextPlanNodeId();
-
-  void cacheOutputSchema(const std::shared_ptr<const facebook::velox::core::PlanNode>& planNode);
-
-  int planNodeId_ = 0;
-
-  std::vector<std::shared_ptr<ResultIterator>> arrowInputIters_;
-
-  std::shared_ptr<facebook::velox::substrait::SubstraitParser> subParser_ =
-      std::make_shared<facebook::velox::substrait::SubstraitParser>();
-
-  std::shared_ptr<facebook::velox::substrait::SubstraitVeloxPlanConverter> subVeloxPlanConverter_ =
-      std::make_shared<facebook::velox::substrait::SubstraitVeloxPlanConverter>(GetDefaultWrappedVeloxMemoryPool());
-
-  // Cache for tests/benchmark purpose.
-  std::shared_ptr<const facebook::velox::core::PlanNode> planNode_;
-  std::shared_ptr<arrow::Schema> output_schema_;
+  std::shared_ptr<facebook::velox::config::ConfigBase> backendConf_;
 };
 
 } // namespace gluten

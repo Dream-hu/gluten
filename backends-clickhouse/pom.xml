@@ -4,8 +4,8 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
   <parent>
     <artifactId>gluten-parent</artifactId>
-    <groupId>io.glutenproject</groupId>
-    <version>1.0.0-SNAPSHOT</version>
+    <groupId>org.apache.gluten</groupId>
+    <version>1.4.0-SNAPSHOT</version>
   </parent>
   <modelVersion>4.0.0</modelVersion>
 
@@ -13,7 +13,92 @@
   <packaging>jar</packaging>
   <name>Gluten Backends ClickHouse</name>
 
+  <profiles>
+    <profile>
+      <id>celeborn</id>
+      <activation>
+        <activeByDefault>false</activeByDefault>
+      </activation>
+      <dependencies>
+        <dependency>
+          <groupId>org.apache.gluten</groupId>
+          <artifactId>gluten-celeborn</artifactId>
+          <version>${project.version}</version>
+        </dependency>
+        <dependency>
+          <groupId>org.apache.celeborn</groupId>
+          <artifactId>celeborn-client-spark-${spark.major.version}-shaded_${scala.binary.version}</artifactId>
+          <version>${celeborn.version}</version>
+          <scope>provided</scope>
+          <exclusions>
+            <exclusion>
+              <groupId>org.apache.celeborn</groupId>
+              <artifactId>celeborn-client-spark-${spark.major.version}_${scala.binary.version}</artifactId>
+            </exclusion>
+            <exclusion>
+              <groupId>org.apache.celeborn</groupId>
+              <artifactId>celeborn-spark-${spark.major.version}-columnar-shuffle_${scala.binary.version}</artifactId>
+            </exclusion>
+          </exclusions>
+        </dependency>
+      </dependencies>
+    </profile>
+    <profile>
+      <id>iceberg</id>
+      <activation>
+        <activeByDefault>false</activeByDefault>
+      </activation>
+      <dependencies>
+        <dependency>
+          <groupId>org.apache.gluten</groupId>
+          <artifactId>gluten-iceberg</artifactId>
+          <version>${project.version}</version>
+        </dependency>
+        <dependency>
+          <groupId>org.apache.iceberg</groupId>
+          <artifactId>iceberg-spark-${sparkbundle.version}_${scala.binary.version}</artifactId>
+          <version>${iceberg.version}</version>
+          <scope>provided</scope>
+        </dependency>
+        <dependency>
+          <groupId>org.apache.iceberg</groupId>
+          <artifactId>iceberg-spark-runtime-${sparkbundle.version}_${scala.binary.version}</artifactId>
+          <version>${iceberg.version}</version>
+          <scope>test</scope>
+        </dependency>
+      </dependencies>
+    </profile>
+  </profiles>
+
   <dependencies>
+    <dependency>
+      <groupId>org.apache.gluten</groupId>
+      <artifactId>gluten-substrait</artifactId>
+      <version>${project.version}</version>
+      <scope>compile</scope>
+      <exclusions>
+        <exclusion>
+          <artifactId>guava</artifactId>
+          <groupId>com.google.guava</groupId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>io.glutenproject</groupId>
+      <artifactId>protobuf-java</artifactId>
+      <version>${custom.protobuf.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.gluten</groupId>
+      <artifactId>gluten-substrait</artifactId>
+      <version>${project.version}</version>
+      <type>test-jar</type>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.github.ben-manes.caffeine</groupId>
+      <artifactId>caffeine</artifactId>
+    </dependency>
     <dependency>
       <groupId>org.apache.spark</groupId>
       <artifactId>spark-sql_${scala.binary.version}</artifactId>
@@ -26,12 +111,27 @@
     </dependency>
     <dependency>
       <groupId>org.apache.spark</groupId>
+      <artifactId>spark-yarn_${scala.binary.version}</artifactId>
+      <scope>provided</scope>
+      <exclusions>
+        <exclusion>
+          <artifactId>hadoop-client-api</artifactId>
+          <groupId>org.apache.hadoop</groupId>
+        </exclusion>
+        <exclusion>
+          <artifactId>hadoop-client-runtime</artifactId>
+          <groupId>org.apache.hadoop</groupId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.spark</groupId>
       <artifactId>spark-catalyst_${scala.binary.version}</artifactId>
       <scope>provided</scope>
     </dependency>
     <dependency>
       <groupId>org.apache.spark</groupId>
-      <artifactId>spark-hive-thriftserver_${scala.binary.version}</artifactId>
+      <artifactId>spark-hive_${scala.binary.version}</artifactId>
       <scope>provided</scope>
     </dependency>
     <dependency>
@@ -51,26 +151,13 @@
     </dependency>
     <dependency>
       <groupId>io.delta</groupId>
-      <artifactId>delta-core_${scala.binary.version}</artifactId>
+      <artifactId>${delta.package.name}_${scala.binary.version}</artifactId>
       <scope>provided</scope>
-    </dependency>
-    <dependency>
-      <groupId>io.glutenproject</groupId>
-      <artifactId>gluten-core</artifactId>
-      <version>${project.version}</version>
-      <scope>compile</scope>
-    </dependency>
-    <dependency>
-      <groupId>io.glutenproject</groupId>
-      <artifactId>gluten-core</artifactId>
-      <version>${project.version}</version>
-      <type>test-jar</type>
-      <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>org.scalacheck</groupId>
       <artifactId>scalacheck_${scala.binary.version}</artifactId>
-      <version>1.13.5</version>
+      <version>1.17.0</version>
       <scope>test</scope>
     </dependency>
     <dependency>
@@ -96,15 +183,51 @@
     </dependency>
     <dependency>
       <groupId>org.scalatestplus</groupId>
-      <artifactId>scalatestplus-mockito_2.12</artifactId>
+      <artifactId>scalatestplus-mockito_${scala.binary.version}</artifactId>
       <version>1.0.0-M2</version>
       <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>org.scalatestplus</groupId>
-      <artifactId>scalatestplus-scalacheck_2.12</artifactId>
+      <artifactId>scalatestplus-scalacheck_${scala.binary.version}</artifactId>
       <version>3.1.0.0-RC2</version>
       <scope>test</scope>
+    </dependency>
+    <dependency>
+       <groupId>org.apache.hive.hcatalog</groupId>
+       <artifactId>hive-hcatalog-core</artifactId>
+	    <version>2.3.9</version>
+	    <scope>test</scope>
+	    <exclusions>
+          <exclusion>
+            <groupId>org.pentaho</groupId>
+            <artifactId>pentaho-aggdesigner-algorithm</artifactId>
+          </exclusion>
+          <exclusion>
+            <groupId>net.minidev</groupId>
+            <artifactId>json-smart</artifactId>
+          </exclusion>
+          <exclusion>
+            <groupId>org.apache.hive</groupId>
+            <artifactId>hive-exec</artifactId>
+          </exclusion>
+          <exclusion>
+            <artifactId>guava</artifactId>
+            <groupId>com.google.guava</groupId>
+          </exclusion>
+          <exclusion>
+            <artifactId>hadoop-common</artifactId>
+            <groupId>org.apache.hadoop</groupId>
+          </exclusion>
+          <exclusion>
+            <artifactId>hadoop-hdfs</artifactId>
+            <groupId>org.apache.hadoop</groupId>
+          </exclusion>
+          <exclusion>
+            <artifactId>protobuf-java</artifactId>
+            <groupId>com.google.protobuf</groupId>
+          </exclusion>
+        </exclusions>
     </dependency>
     <dependency>
       <groupId>org.apache.hadoop</groupId>
@@ -115,29 +238,75 @@
     <dependency>
       <groupId>commons-io</groupId>
       <artifactId>commons-io</artifactId>
-      <version>2.11.0</version>
+      <version>2.14.0</version>
       <scope>provided</scope>
     </dependency>
     <!-- Fasterxml -->
     <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-databind</artifactId>
-      <scope>provided</scope>
     </dependency>
     <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-annotations</artifactId>
-      <scope>provided</scope>
     </dependency>
     <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-core</artifactId>
-      <scope>provided</scope>
     </dependency>
     <dependency>
       <groupId>com.fasterxml.jackson.module</groupId>
       <artifactId>jackson-module-scala_${scala.binary.version}</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.hadoop</groupId>
+      <artifactId>hadoop-aws</artifactId>
+      <version>${hadoop.version}</version>
       <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.amazonaws</groupId>
+      <artifactId>aws-java-sdk-bundle</artifactId>
+      <version>1.11.901</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.minio</groupId>
+      <artifactId>minio</artifactId>
+      <version>8.5.9</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.arrow</groupId>
+      <artifactId>arrow-memory-core</artifactId>
+      <version>${arrow.version}</version>
+      <scope>provided</scope>
+      <exclusions>
+        <exclusion>
+          <groupId>io.netty</groupId>
+          <artifactId>netty-common</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>io.netty</groupId>
+          <artifactId>netty-buffer</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.arrow</groupId>
+      <artifactId>arrow-vector</artifactId>
+      <version>${arrow.version}</version>
+      <scope>provided</scope>
+      <exclusions>
+        <exclusion>
+          <groupId>io.netty</groupId>
+          <artifactId>netty-common</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>io.netty</groupId>
+          <artifactId>netty-buffer</artifactId>
+        </exclusion>
+      </exclusions>
     </dependency>
   </dependencies>
 
@@ -145,6 +314,49 @@
     <outputDirectory>target/scala-${scala.binary.version}/classes</outputDirectory>
     <testOutputDirectory>target/scala-${scala.binary.version}/test-classes</testOutputDirectory>
     <plugins>
+      <!-- compile proto buffer files using copied protoc binary -->
+      <plugin>
+        <groupId>org.xolstice.maven.plugins</groupId>
+        <artifactId>protobuf-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>compile-gluten-proto</id>
+            <phase>generate-sources</phase>
+            <goals>
+              <goal>compile</goal>
+              <goal>test-compile</goal>
+            </goals>
+            <configuration>
+              <protocArtifact>
+                com.google.protobuf:protoc:${protobuf.version}:exe:${os.detected.classifier}
+              </protocArtifact>
+              <protoSourceRoot>src/main/resources/org/apache/spark/sql/execution/datasources/v1</protoSourceRoot>
+              <clearOutputDirectory>false</clearOutputDirectory>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-enforcer-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>enforce-delta-profile</id>
+            <goals>
+              <goal>enforce</goal>
+            </goals>
+            <configuration>
+              <rules>
+                <requireActiveProfile>
+                  <!--ClickHouse backend requires -P delta to be set-->
+                  <profiles>delta</profiles>
+                  <message>"-P delta" must be set when building Gluten with ClickHouse backend.</message>
+                </requireActiveProfile>
+              </rules>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-resources-plugin</artifactId>
@@ -158,21 +370,57 @@
         <artifactId>maven-compiler-plugin</artifactId>
       </plugin>
       <plugin>
-        <artifactId>maven-assembly-plugin</artifactId>
-        <version>3.3.0</version>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-shade-plugin</artifactId>
         <configuration>
-          <finalName>${jar.assembly.name.prefix}-${project.version}-spark-${sparkbundle.version}
-          </finalName>
-          <descriptorRefs>
-            <descriptorRef>jar-with-dependencies</descriptorRef>
-          </descriptorRefs>
+          <createDependencyReducedPom>false</createDependencyReducedPom>
+          <shadedArtifactAttached>false</shadedArtifactAttached>
+          <outputFile>target/${jar.assembly.name.prefix}-${project.version}-spark-${sparkbundle.version}-jar-with-dependencies.jar</outputFile>
+          <relocations>
+            <relocation>
+              <pattern>com.google.protobuf</pattern>
+              <shadedPattern>${gluten.shade.packageName}.com.google.protobuf</shadedPattern>
+            </relocation>
+            <relocation>
+              <pattern>google.protobuf</pattern>
+	          <shadedPattern>${gluten.shade.packageName}.google.protobuf</shadedPattern>
+            </relocation>
+            <relocation>
+              <pattern>com.google.gson</pattern>
+              <shadedPattern>${gluten.shade.packageName}.com.google.gson</shadedPattern>
+              <includes>
+                <include>com.google.gson.**</include>
+              </includes>
+            </relocation>
+            <relocation>
+              <pattern>com.google.errorprone.annotations</pattern>
+              <shadedPattern>${gluten.shade.packageName}.com.google.errorprone.annotations</shadedPattern>
+              <includes>
+                <include>com.google.errorprone.annotations.**</include>
+              </includes>
+            </relocation>
+            <relocation>
+              <pattern>com.google.j2objc</pattern>
+              <shadedPattern>${gluten.shade.packageName}.com.google.j2objc</shadedPattern>
+              <includes>
+                <include>com.google.j2objc.**</include>
+              </includes>
+            </relocation>
+            <relocation>
+              <pattern>com.github.benmanes.caffeine</pattern>
+              <shadedPattern>${gluten.shade.packageName}.com.github.benmanes.caffeine</shadedPattern>
+            </relocation>
+            <relocation>
+              <pattern>org.checkerframework</pattern>
+              <shadedPattern>${gluten.shade.packageName}.org.checkerframework</shadedPattern>
+            </relocation>
+          </relocations>
         </configuration>
         <executions>
           <execution>
-            <id>make-assembly</id>
             <phase>package</phase>
             <goals>
-              <goal>single</goal>
+              <goal>shade</goal>
             </goals>
           </execution>
         </executions>
@@ -192,9 +440,16 @@
             <includes>
               <include>src/main/scala/**/*.scala</include>
               <include>src/test/scala/**/*.scala</include>
-              <include>src/main/delta-${delta.binary.version}/**/*.scala</include>
-              <include>src/test/delta-${delta.binary.version}/**/*.scala</include>
+              <include>src-delta-${delta.binary.version}/main/delta/**/*.scala</include>
+              <include>src-delta-${delta.binary.version}/test/delta/**/*.scala</include>
             </includes>
+            <excludes>
+              <exclude>src-delta-${delta.binary.version}/main/delta/org/apache/spark/sql/delta/commands/*.scala</exclude>
+              <exclude>src-delta-${delta.binary.version}/main/delta/org/apache/spark/sql/delta/commands/merge/*.scala</exclude>
+              <exclude>src-delta-${delta.binary.version}/main/delta/org/apache/spark/sql/delta/stats/*.scala</exclude>
+              <exclude>src-delta-${delta.binary.version}/main/delta/org/apache/spark/sql/delta/DeltaLog.scala</exclude>
+              <exclude>src-delta-${delta.binary.version}/main/delta/org/apache/spark/sql/delta/Snapshot.scala</exclude>
+            </excludes>
           </scala>
         </configuration>
       </plugin>
@@ -234,22 +489,20 @@
         </executions>
       </plugin>
       <plugin>
-        <groupId>org.codehaus.mojo</groupId>
-        <artifactId>build-helper-maven-plugin</artifactId>
+        <groupId>org.antlr</groupId>
+        <artifactId>antlr4-maven-plugin</artifactId>
         <executions>
           <execution>
-            <id>add-sources</id>
-            <phase>generate-sources</phase>
             <goals>
-              <goal>add-source</goal>
+              <goal>antlr4</goal>
             </goals>
-            <configuration>
-              <sources>
-                <source>src/main/delta-${delta.binary.version}</source>
-              </sources>
-            </configuration>
           </execution>
         </executions>
+        <configuration>
+          <visitor>true</visitor>
+          <sourceDirectory>../backends-clickhouse/src/main/antlr4</sourceDirectory>
+          <treatWarningsAsErrors>true</treatWarningsAsErrors>
+        </configuration>
       </plugin>
     </plugins>
   </build>

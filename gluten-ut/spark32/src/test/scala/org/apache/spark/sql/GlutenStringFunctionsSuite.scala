@@ -14,16 +14,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.spark.sql
 
 import org.apache.spark.sql.catalyst.expressions.ExpressionEvalHelper
 
-class GlutenStringFunctionsSuite extends StringFunctionsSuite
+class GlutenStringFunctionsSuite
+  extends StringFunctionsSuite
   with GlutenSQLTestsTrait
-  with ExpressionEvalHelper {
-
-  override def testNameBlackList: Seq[String] = super.testNameBlackList ++ Seq(
-    "string / binary length function"
-  )
-}
+  with ExpressionEvalHelper {}

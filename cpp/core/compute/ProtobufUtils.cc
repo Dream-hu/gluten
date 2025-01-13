@@ -17,63 +17,75 @@
 
 #include "ProtobufUtils.h"
 
+#include <glog/logging.h>
 #include <google/protobuf/util/json_util.h>
 #include <google/protobuf/util/type_resolver_util.h>
 #include <fstream>
+
+#include "utils/Exception.h"
 
 namespace gluten {
 
 // Common for both projector and filters.
 
-bool ParseProtobuf(const uint8_t* buf, int bufLen, google::protobuf::Message* msg) {
-  google::protobuf::io::CodedInputStream coded_stream{buf, bufLen};
+bool parseProtobuf(const uint8_t* buf, int bufLen, google::protobuf::Message* msg) {
+  google::protobuf::io::CodedInputStream codedStream{buf, bufLen};
   // The default recursion limit is 100 which is too smaller for a deep
   // Substrait plan.
-  coded_stream.SetRecursionLimit(100000);
-  return msg->ParseFromCodedStream(&coded_stream);
+  codedStream.SetRecursionLimit(100000);
+  return msg->ParseFromCodedStream(&codedStream);
 }
 
-inline google::protobuf::util::TypeResolver* GetGeneratedTypeResolver() {
-  static std::unique_ptr<google::protobuf::util::TypeResolver> type_resolver;
-  static std::once_flag type_resolver_init;
-  std::call_once(type_resolver_init, []() {
-    type_resolver.reset(google::protobuf::util::NewTypeResolverForDescriptorPool(
+inline google::protobuf::util::TypeResolver* getGeneratedTypeResolver() {
+  static std::unique_ptr<google::protobuf::util::TypeResolver> typeResolver;
+  static std::once_flag typeResolverInit;
+  std::call_once(typeResolverInit, []() {
+    typeResolver.reset(google::protobuf::util::NewTypeResolverForDescriptorPool(
         /*url_prefix=*/"", google::protobuf::DescriptorPool::generated_pool()));
   });
-  return type_resolver.get();
+  return typeResolver.get();
 }
 
-arrow::Result<std::shared_ptr<arrow::Buffer>> SubstraitFromJsonToPb(
-    arrow::util::string_view type_name,
-    arrow::util::string_view json) {
-  std::string type_url = "/substrait." + type_name.to_string();
+std::string substraitFromJsonToPb(std::string_view typeName, std::string_view json) {
+  std::string typeUrl = "/substrait." + std::string(typeName);
 
-  google::protobuf::io::ArrayInputStream json_stream{json.data(), static_cast<int>(json.size())};
+  google::protobuf::io::ArrayInputStream jsonStream{json.data(), static_cast<int>(json.size())};
 
   std::string out;
-  google::protobuf::io::StringOutputStream out_stream{&out};
+  google::protobuf::io::StringOutputStream outStream{&out};
 
   auto status =
-      google::protobuf::util::JsonToBinaryStream(GetGeneratedTypeResolver(), type_url, &json_stream, &out_stream);
+      google::protobuf::util::JsonToBinaryStream(getGeneratedTypeResolver(), typeUrl, &jsonStream, &outStream);
 
   if (!status.ok()) {
-    return arrow::Status::Invalid("JsonToBinaryStream returned ", status);
+    throw GlutenException("JsonToBinaryStream returned " + status.ToString());
   }
-  return arrow::Buffer::FromString(std::move(out));
+  return out;
 }
 
-arrow::Result<std::string> SubstraitFromPbToJson(arrow::util::string_view type_name, const arrow::Buffer& buf) {
-  std::string type_url = "/substrait." + type_name.to_string();
+std::string substraitFromPbToJson(
+    std::string_view typeName,
+    const uint8_t* data,
+    int32_t size,
+    std::optional<std::string> dumpFile) {
+  std::string typeUrl = "/substrait." + std::string(typeName);
 
-  google::protobuf::io::ArrayInputStream buf_stream{buf.data(), static_cast<int>(buf.size())};
+  google::protobuf::io::ArrayInputStream bufStream{data, size};
 
   std::string out;
-  google::protobuf::io::StringOutputStream out_stream{&out};
+  google::protobuf::io::StringOutputStream outStream{&out};
 
-  auto status =
-      google::protobuf::util::BinaryToJsonStream(GetGeneratedTypeResolver(), type_url, &buf_stream, &out_stream);
+  auto status = google::protobuf::util::BinaryToJsonStream(getGeneratedTypeResolver(), typeUrl, &bufStream, &outStream);
   if (!status.ok()) {
-    return arrow::Status::Invalid("BinaryToJsonStream returned ", status);
+    throw GlutenException("BinaryToJsonStream returned " + status.ToString());
+  }
+
+  if (dumpFile.has_value()) {
+    std::ofstream outFile(*dumpFile);
+    if (!outFile.is_open()) {
+      LOG(ERROR) << "Failed to open file for writing: " << *dumpFile;
+    }
+    outFile << out << std::endl;
   }
   return out;
 }
