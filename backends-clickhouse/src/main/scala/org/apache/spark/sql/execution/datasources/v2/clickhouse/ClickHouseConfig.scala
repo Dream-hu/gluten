@@ -16,6 +16,11 @@
  */
 package org.apache.spark.sql.execution.datasources.v2.clickhouse
 
+import org.apache.gluten.backendsapi.clickhouse.CHConf
+
+import org.apache.spark.sql.catalyst.catalog.BucketSpec
+import org.apache.spark.sql.execution.datasources.mergetree.StorageMeta
+
 import java.util
 
 import scala.collection.JavaConverters.mapAsScalaMapConverter
@@ -26,43 +31,64 @@ object ClickHouseConfig {
   val NAME = "clickhouse"
   val ALT_NAME = "clickhouse"
   val METADATA_DIR = "_delta_log"
-  val DEFAULT_ENGINE = "MergeTree"
+  private val FORMAT_ENGINE = "engine"
+  private val DEFAULT_ENGINE = "mergetree"
+  private val OPT_NAME_PREFIX = "clickhouse."
 
-  // Whether to use MergeTree DataSource V2 API, default is false, fall back to V1.
-  val USE_DATASOURCE_V2 = "spark.gluten.sql.columnar.backend.ch.use.v2"
-  val DEFAULT_USE_DATASOURCE_V2 = "false"
+  val CLICKHOUSE_WORKER_ID: String = CHConf.prefixOf("worker.id")
 
-  val CLICKHOUSE_WORKER_ID = "spark.gluten.sql.columnar.backend.ch.worker.id"
-
-  val CLICKHOUSE_WAREHOUSE_DIR = "spark.gluten.sql.columnar.backend.ch.warehouse.dir"
-
-  /** Validates specified configurations and returns the normalized key -> value map. */
-  def validateConfigurations(allProperties: util.Map[String, String]): Map[String, String] = {
+  /** Create a mergetree configurations and returns the normalized key -> value map. */
+  def createMergeTreeConfigurations(
+      allProperties: util.Map[String, String],
+      buckets: Option[BucketSpec] = None): Map[String, String] = {
     val configurations = scala.collection.mutable.Map[String, String]()
     allProperties.asScala.foreach(configurations += _)
     if (!configurations.contains("metadata_path")) {
       configurations += ("metadata_path" -> METADATA_DIR)
     }
-    if (!configurations.contains("engine")) {
-      configurations += ("engine" -> DEFAULT_ENGINE)
+    if (!configurations.contains(FORMAT_ENGINE)) {
+      configurations += (FORMAT_ENGINE -> DEFAULT_ENGINE)
     } else {
-      val engineValue = configurations.get("engine")
-      if (!engineValue.equals(DEFAULT_ENGINE) && !engineValue.equals("parquet")) {
-        configurations += ("engine" -> DEFAULT_ENGINE)
+      if (
+        !configurations
+          .get(FORMAT_ENGINE)
+          .exists(s => s.equals(DEFAULT_ENGINE) || s.equals("parquet"))
+      ) {
+        configurations += (FORMAT_ENGINE -> DEFAULT_ENGINE)
       }
-    }
-    if (!configurations.contains("primary_key")) {
-      configurations += ("primary_key" -> "")
     }
     if (!configurations.contains("sampling_key")) {
       configurations += ("sampling_key" -> "")
     }
-    if (!configurations.contains("storage_policy")) {
-      configurations += ("storage_policy" -> "default")
+    if (!configurations.contains(StorageMeta.POLICY)) {
+      configurations += (StorageMeta.POLICY -> "default")
     }
     if (!configurations.contains("is_distribute")) {
       configurations += ("is_distribute" -> "true")
     }
+
+    if (buckets.isDefined) {
+      val bucketSpec = buckets.get
+      configurations += ("numBuckets" -> bucketSpec.numBuckets.toString)
+      configurations += ("bucketColumnNames" -> bucketSpec.bucketColumnNames.mkString(","))
+      if (bucketSpec.sortColumnNames.nonEmpty) {
+        configurations += ("orderByKey" -> bucketSpec.sortColumnNames.mkString(","))
+      }
+    }
     configurations.toMap
+  }
+
+  def isMergeTreeFormatEngine(configuration: Map[String, String]): Boolean = {
+    configuration.get(FORMAT_ENGINE).exists(_.equals(DEFAULT_ENGINE))
+  }
+
+  /** Get the related clickhouse option when using DataFrameWriter / DataFrameReader */
+  def getMergeTreeConfigurations(
+      properties: util.Map[String, String]
+  ): Map[String, String] = {
+    properties.asScala
+      .filterKeys(_.startsWith(OPT_NAME_PREFIX))
+      .map(x => (x._1.substring(OPT_NAME_PREFIX.length), x._2))
+      .toMap
   }
 }

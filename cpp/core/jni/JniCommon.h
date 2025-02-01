@@ -19,223 +19,23 @@
 
 #include <arrow/ipc/reader.h>
 #include <arrow/ipc/writer.h>
-#include <arrow/util/parallel.h>
+#include <execinfo.h>
 #include <jni.h>
 
 #include "compute/ProtobufUtils.h"
-#include "memory/ArrowMemoryPool.h"
-#include "utils/exception.h"
+#include "compute/Runtime.h"
+#include "config/GlutenConfig.h"
+#include "memory/AllocationListener.h"
+#include "operators/writer/ArrowWriter.h"
+#include "shuffle/rss/RssClient.h"
+#include "utils/Compression.h"
+#include "utils/Exception.h"
+#include "utils/ObjectStore.h"
+#include "utils/ResourceMap.h"
 
-#ifdef GLUTEN_ENABLE_QAT
-#include "utils/qat_util.h"
-#endif
+static jint jniVersion = JNI_VERSION_1_8;
 
-static jint JNI_VERSION = JNI_VERSION_1_8;
-
-static inline jclass CreateGlobalClassReference(JNIEnv* env, const char* class_name) {
-  jclass local_class = env->FindClass(class_name);
-  jclass global_class = (jclass)env->NewGlobalRef(local_class);
-  env->DeleteLocalRef(local_class);
-  return global_class;
-}
-
-static inline jmethodID GetMethodID(JNIEnv* env, jclass this_class, const char* name, const char* sig) {
-  jmethodID ret = env->GetMethodID(this_class, name, sig);
-  return ret;
-}
-
-static inline jmethodID GetStaticMethodID(JNIEnv* env, jclass this_class, const char* name, const char* sig) {
-  jmethodID ret = env->GetStaticMethodID(this_class, name, sig);
-  return ret;
-}
-
-static inline std::shared_ptr<arrow::DataType> GetOffsetDataType(std::shared_ptr<arrow::DataType> parent_type) {
-  switch (parent_type->id()) {
-    case arrow::BinaryType::type_id:
-      return std::make_shared<arrow::TypeTraits<arrow::BinaryType>::OffsetType>();
-    case arrow::LargeBinaryType::type_id:
-      return std::make_shared<arrow::TypeTraits<arrow::LargeBinaryType>::OffsetType>();
-    case arrow::ListType::type_id:
-      return std::make_shared<arrow::TypeTraits<arrow::ListType>::OffsetType>();
-    case arrow::LargeListType::type_id:
-      return std::make_shared<arrow::TypeTraits<arrow::LargeListType>::OffsetType>();
-    default:
-      return nullptr;
-  }
-}
-
-template <typename T>
-inline bool is_fixed_width_type(T _) {
-  return std::is_base_of<arrow::FixedWidthType, T>::value;
-}
-
-static inline arrow::Status AppendNodes(
-    std::shared_ptr<arrow::Array> column,
-    std::vector<std::pair<int64_t, int64_t>>* nodes) {
-  auto type = column->type();
-  (*nodes).push_back(std::make_pair(column->length(), column->null_count()));
-  switch (type->id()) {
-    case arrow::Type::LIST:
-    case arrow::Type::LARGE_LIST: {
-      auto list_array = std::dynamic_pointer_cast<arrow::ListArray>(column);
-      RETURN_NOT_OK(AppendNodes(list_array->values(), nodes));
-    } break;
-    default: {
-    } break;
-  }
-  return arrow::Status::OK();
-}
-
-static inline arrow::Status AppendBuffers(
-    std::shared_ptr<arrow::Array> column,
-    std::vector<std::shared_ptr<arrow::Buffer>>* buffers) {
-  auto type = column->type();
-  switch (type->id()) {
-    case arrow::Type::LIST:
-    case arrow::Type::LARGE_LIST: {
-      auto list_array = std::dynamic_pointer_cast<arrow::ListArray>(column);
-      (*buffers).push_back(list_array->null_bitmap());
-      (*buffers).push_back(list_array->value_offsets());
-      RETURN_NOT_OK(AppendBuffers(list_array->values(), buffers));
-    } break;
-    default: {
-      for (auto& buffer : column->data()->buffers) {
-        (*buffers).push_back(buffer);
-      }
-    } break;
-  }
-  return arrow::Status::OK();
-}
-
-static inline arrow::Status FIXOffsetBuffer(std::shared_ptr<arrow::Buffer>* in_buf, int fix_row) {
-  if ((*in_buf) == nullptr || (*in_buf)->size() == 0)
-    return arrow::Status::OK();
-  if ((*in_buf)->size() * 8 <= fix_row) {
-    ARROW_ASSIGN_OR_RAISE(auto valid_copy, arrow::AllocateBuffer((*in_buf)->size() + 1));
-    std::memcpy(valid_copy->mutable_data(), (*in_buf)->data(), static_cast<size_t>((*in_buf)->size()));
-    (*in_buf) = std::move(valid_copy);
-  }
-  arrow::bit_util::SetBitsTo(const_cast<uint8_t*>((*in_buf)->data()), fix_row, 1, true);
-  return arrow::Status::OK();
-}
-
-static inline arrow::Status MakeArrayData(
-    std::shared_ptr<arrow::DataType> type,
-    int num_rows,
-    std::vector<std::shared_ptr<arrow::Buffer>> in_bufs,
-    int in_bufs_len,
-    std::shared_ptr<arrow::ArrayData>* arr_data,
-    int* buf_idx_ptr) {
-  if (arrow::is_nested(type->id())) {
-    // Maybe ListType, MapType, StructType or UnionType
-    switch (type->id()) {
-      case arrow::Type::LIST:
-      case arrow::Type::LARGE_LIST: {
-        auto offset_data_type = GetOffsetDataType(type);
-        auto list_type = std::dynamic_pointer_cast<arrow::ListType>(type);
-        auto child_type = list_type->value_type();
-        std::shared_ptr<arrow::ArrayData> child_array_data, offset_array_data;
-        // create offset array
-        // Chendi: For some reason, for ListArray::FromArrays will remove last
-        // row from offset array, refer to array_nested.cc CleanListOffsets
-        // function
-        FIXOffsetBuffer(&in_bufs[*buf_idx_ptr], num_rows);
-        RETURN_NOT_OK(
-            MakeArrayData(offset_data_type, num_rows + 1, in_bufs, in_bufs_len, &offset_array_data, buf_idx_ptr));
-        auto offset_array = arrow::MakeArray(offset_array_data);
-        // create child data array
-        RETURN_NOT_OK(MakeArrayData(child_type, -1, in_bufs, in_bufs_len, &child_array_data, buf_idx_ptr));
-        auto child_array = arrow::MakeArray(child_array_data);
-        auto list_array = arrow::ListArray::FromArrays(*offset_array, *child_array).ValueOrDie();
-        *arr_data = list_array->data();
-
-      } break;
-      default:
-        return arrow::Status::NotImplemented("MakeArrayData for type ", type->ToString(), " is not supported yet.");
-    }
-
-  } else {
-    int64_t null_count = arrow::kUnknownNullCount;
-    std::vector<std::shared_ptr<arrow::Buffer>> buffers;
-    if (*buf_idx_ptr >= in_bufs_len) {
-      return arrow::Status::Invalid("insufficient number of in_buf_addrs");
-    }
-    if (in_bufs[*buf_idx_ptr]->size() == 0) {
-      null_count = 0;
-    }
-    buffers.push_back(in_bufs[*buf_idx_ptr]);
-    *buf_idx_ptr += 1;
-
-    if (arrow::is_binary_like(type->id())) {
-      if (*buf_idx_ptr >= in_bufs_len) {
-        return arrow::Status::Invalid("insufficient number of in_buf_addrs");
-      }
-
-      buffers.push_back(in_bufs[*buf_idx_ptr]);
-      auto offsets_size = in_bufs[*buf_idx_ptr]->size();
-      *buf_idx_ptr += 1;
-      if (num_rows == -1)
-        num_rows = offsets_size / 4 - 1;
-    }
-
-    if (*buf_idx_ptr >= in_bufs_len) {
-      return arrow::Status::Invalid("insufficient number of in_buf_addrs");
-    }
-    auto value_size = in_bufs[*buf_idx_ptr]->size();
-    buffers.push_back(in_bufs[*buf_idx_ptr]);
-    *buf_idx_ptr += 1;
-    if (num_rows == -1) {
-      num_rows = value_size * 8 / arrow::bit_width(type->id());
-    }
-
-    *arr_data = arrow::ArrayData::Make(type, num_rows, std::move(buffers), null_count);
-  }
-  return arrow::Status::OK();
-}
-
-static inline arrow::Status MakeRecordBatch(
-    const std::shared_ptr<arrow::Schema>& schema,
-    int num_rows,
-    std::vector<std::shared_ptr<arrow::Buffer>> in_bufs,
-    int in_bufs_len,
-    std::shared_ptr<arrow::RecordBatch>* batch) {
-  std::vector<std::shared_ptr<arrow::ArrayData>> arrays;
-  auto num_fields = schema->num_fields();
-  int buf_idx = 0;
-
-  for (int i = 0; i < num_fields; i++) {
-    auto field = schema->field(i);
-    std::shared_ptr<arrow::ArrayData> array_data;
-    RETURN_NOT_OK(MakeArrayData(field->type(), num_rows, in_bufs, in_bufs_len, &array_data, &buf_idx));
-    arrays.push_back(array_data);
-  }
-
-  *batch = arrow::RecordBatch::Make(schema, num_rows, arrays);
-  return arrow::Status::OK();
-}
-
-static inline arrow::Status MakeRecordBatch(
-    const std::shared_ptr<arrow::Schema>& schema,
-    int num_rows,
-    int64_t* in_buf_addrs,
-    int64_t* in_buf_sizes,
-    int in_bufs_len,
-    std::shared_ptr<arrow::RecordBatch>* batch) {
-  std::vector<std::shared_ptr<arrow::ArrayData>> arrays;
-  std::vector<std::shared_ptr<arrow::Buffer>> buffers;
-  for (int i = 0; i < in_bufs_len; i++) {
-    if (in_buf_addrs[i] != 0) {
-      auto data = std::shared_ptr<arrow::Buffer>(
-          new arrow::Buffer(reinterpret_cast<uint8_t*>(in_buf_addrs[i]), in_buf_sizes[i]));
-      buffers.push_back(data);
-    } else {
-      buffers.push_back(std::make_shared<arrow::Buffer>(nullptr, 0));
-    }
-  }
-  return MakeRecordBatch(schema, num_rows, buffers, in_bufs_len, batch);
-}
-
-static inline std::string JStringToCString(JNIEnv* env, jstring string) {
+static inline std::string jStringToCString(JNIEnv* env, jstring string) {
   int32_t jlen, clen;
   clen = env->GetStringUTFLength(string);
   jlen = env->GetStringLength(string);
@@ -244,123 +44,77 @@ static inline std::string JStringToCString(JNIEnv* env, jstring string) {
   return std::string(buffer, clen);
 }
 
-static inline jbyteArray ToSchemaByteArray(JNIEnv* env, std::shared_ptr<arrow::Schema> schema) {
-  arrow::Status status;
-  // std::shared_ptr<arrow::Buffer> buffer;
-  arrow::Result<std::shared_ptr<arrow::Buffer>> maybe_buffer;
-  maybe_buffer = arrow::ipc::SerializeSchema(*schema.get(), gluten::GetDefaultWrappedArrowMemoryPool().get());
-  if (!status.ok()) {
-    std::string error_message = "Unable to convert schema to byte array, err is " + status.message();
-    throw gluten::GlutenException(error_message);
+static inline void checkException(JNIEnv* env) {
+  if (env->ExceptionCheck()) {
+    jthrowable t = env->ExceptionOccurred();
+    env->ExceptionClear();
+    jclass describerClass = env->FindClass("org/apache/gluten/exception/JniExceptionDescriber");
+    jmethodID describeMethod =
+        env->GetStaticMethodID(describerClass, "describe", "(Ljava/lang/Throwable;)Ljava/lang/String;");
+    std::string description =
+        jStringToCString(env, (jstring)env->CallStaticObjectMethod(describerClass, describeMethod, t));
+    if (env->ExceptionCheck()) {
+      LOG(WARNING) << "Fatal: Uncaught Java exception during calling the Java exception describer method! ";
+    }
+    throw gluten::GlutenException("Error during calling Java code from native code: " + description);
   }
-  auto buffer = *std::move(maybe_buffer);
-  jbyteArray out = env->NewByteArray(buffer->size());
-  auto src = reinterpret_cast<const jbyte*>(buffer->data());
-  env->SetByteArrayRegion(out, 0, buffer->size(), src);
-  return out;
 }
 
-static inline arrow::Result<arrow::Compression::type> GetCompressionType(JNIEnv* env, jstring codec_jstr) {
-  auto codec_u = env->GetStringUTFChars(codec_jstr, JNI_FALSE);
-
-  std::string codec_l;
-  std::transform(codec_u, codec_u + std::strlen(codec_u), std::back_inserter(codec_l), ::tolower);
-#ifdef GLUTEN_ENABLE_QAT
-  // TODO: Support more codec.
-  static const std::string qat_codec_prefix = "gluten_qat_";
-  if (codec_l.rfind(qat_codec_prefix, 0) == 0) {
-    auto codec = codec_l.substr(qat_codec_prefix.size());
-    if (gluten::qat::SupportsCodec(codec)) {
-      gluten::qat::EnsureQatCodecRegistered(codec);
-      codec_l = "custom";
-    } else {
-      std::string error_message = "Unrecognized compression codec: " + codec_l;
-      env->ReleaseStringUTFChars(codec_jstr, codec_u);
-      throw gluten::GlutenException(error_message);
-    }
-  }
-#endif
-
-  ARROW_ASSIGN_OR_RAISE(auto compression_type, arrow::util::Codec::GetCompressionType(codec_l));
-
-  if (compression_type == arrow::Compression::LZ4) {
-    compression_type = arrow::Compression::LZ4_FRAME;
-  }
-  env->ReleaseStringUTFChars(codec_jstr, codec_u);
-  return compression_type;
+static inline jclass createGlobalClassReference(JNIEnv* env, const char* className) {
+  jclass localClass = env->FindClass(className);
+  jclass globalClass = (jclass)env->NewGlobalRef(localClass);
+  env->DeleteLocalRef(localClass);
+  return globalClass;
 }
 
-static inline arrow::Status DecompressBuffer(
-    const arrow::Buffer& buffer,
-    arrow::util::Codec* codec,
-    std::shared_ptr<arrow::Buffer>* out,
-    arrow::MemoryPool* pool) {
-  const uint8_t* data = buffer.data();
-  int64_t compressed_size = buffer.size() - sizeof(int64_t);
-  int64_t uncompressed_size = arrow::bit_util::FromLittleEndian(arrow::util::SafeLoadAs<int64_t>(data));
-  ARROW_ASSIGN_OR_RAISE(auto uncompressed, AllocateBuffer(uncompressed_size, pool));
-
-  int64_t actual_decompressed;
-  ARROW_ASSIGN_OR_RAISE(
-      actual_decompressed,
-      codec->Decompress(compressed_size, data + sizeof(int64_t), uncompressed_size, uncompressed->mutable_data()));
-  if (actual_decompressed != uncompressed_size) {
-    return arrow::Status::Invalid(
-        "Failed to fully decompress buffer, expected ",
-        uncompressed_size,
-        " bytes but decompressed ",
-        actual_decompressed);
+static inline jclass createGlobalClassReferenceOrError(JNIEnv* env, const char* className) {
+  jclass globalClass = createGlobalClassReference(env, className);
+  if (globalClass == nullptr) {
+    std::string errorMessage = "Unable to CreateGlobalClassReferenceOrError for" + std::string(className);
+    throw gluten::GlutenException(errorMessage);
   }
-  *out = std::move(uncompressed);
-  return arrow::Status::OK();
+  return globalClass;
 }
 
-static inline arrow::Status DecompressBuffers(
-    arrow::Compression::type compression,
-    const arrow::ipc::IpcReadOptions& options,
-    const uint8_t* buf_mask,
-    std::vector<std::shared_ptr<arrow::Buffer>>& buffers,
-    const std::vector<std::shared_ptr<arrow::Field>>& schema_fields) {
-  std::unique_ptr<arrow::util::Codec> codec;
-  ARROW_ASSIGN_OR_RAISE(codec, arrow::util::Codec::Create(compression));
-
-  auto DecompressOne = [&buffers, &buf_mask, &codec, &options](int i) {
-    if (buffers[i] == nullptr || buffers[i]->size() == 0) {
-      return arrow::Status::OK();
-    }
-    // if the buffer has been rebuilt to uncompressed on java side, return
-    if (arrow::bit_util::GetBit(buf_mask, i)) {
-      ARROW_ASSIGN_OR_RAISE(auto valid_copy, buffers[i]->CopySlice(0, buffers[i]->size()));
-      buffers[i] = valid_copy;
-      return arrow::Status::OK();
-    }
-
-    if (buffers[i]->size() < 8) {
-      return arrow::Status::Invalid(
-          "Likely corrupted message, compressed buffers "
-          "are larger than 8 bytes by construction");
-    }
-    RETURN_NOT_OK(DecompressBuffer(*buffers[i], codec.get(), &buffers[i], options.memory_pool));
-    return arrow::Status::OK();
-  };
-
-  return ::arrow::internal::OptionalParallelFor(options.use_threads, static_cast<int>(buffers.size()), DecompressOne);
+static inline jmethodID getMethodId(JNIEnv* env, jclass thisClass, const char* name, const char* sig) {
+  jmethodID ret = env->GetMethodID(thisClass, name, sig);
+  return ret;
 }
 
-static inline void AttachCurrentThreadAsDaemonOrThrow(JavaVM* vm, JNIEnv** out) {
-  int getEnvStat = vm->GetEnv(reinterpret_cast<void**>(out), JNI_VERSION);
+static inline jmethodID getMethodIdOrError(JNIEnv* env, jclass thisClass, const char* name, const char* sig) {
+  jmethodID ret = getMethodId(env, thisClass, name, sig);
+  if (ret == nullptr) {
+    std::string errorMessage = "Unable to find method " + std::string(name) + " within signature" + std::string(sig);
+    throw gluten::GlutenException(errorMessage);
+  }
+  return ret;
+}
+
+static inline jmethodID getStaticMethodId(JNIEnv* env, jclass thisClass, const char* name, const char* sig) {
+  jmethodID ret = env->GetStaticMethodID(thisClass, name, sig);
+  return ret;
+}
+
+static inline jmethodID getStaticMethodIdOrError(JNIEnv* env, jclass thisClass, const char* name, const char* sig) {
+  jmethodID ret = getStaticMethodId(env, thisClass, name, sig);
+  if (ret == nullptr) {
+    std::string errorMessage =
+        "Unable to find static method " + std::string(name) + " within signature" + std::string(sig);
+    throw gluten::GlutenException(errorMessage);
+  }
+  return ret;
+}
+
+static inline void attachCurrentThreadAsDaemonOrThrow(JavaVM* vm, JNIEnv** out) {
+  int getEnvStat = vm->GetEnv(reinterpret_cast<void**>(out), jniVersion);
   if (getEnvStat == JNI_EDETACHED) {
-#ifdef GLUTEN_PRINT_DEBUG
-    std::cout << "JNIEnv was not attached to current thread." << std::endl;
-#endif
+    DLOG(INFO) << "JNIEnv was not attached to current thread.";
     // Reattach current thread to JVM
     getEnvStat = vm->AttachCurrentThreadAsDaemon(reinterpret_cast<void**>(out), NULL);
     if (getEnvStat != JNI_OK) {
       throw gluten::GlutenException("Failed to reattach current thread to JVM.");
     }
-#ifdef GLUTEN_PRINT_DEBUG
-    std::cout << "Succeeded attaching current thread." << std::endl;
-#endif
+    DLOG(INFO) << "Succeeded attaching current thread.";
     return;
   }
   if (getEnvStat != JNI_OK) {
@@ -368,96 +122,395 @@ static inline void AttachCurrentThreadAsDaemonOrThrow(JavaVM* vm, JNIEnv** out) 
   }
 }
 
-static inline void CheckException(JNIEnv* env) {
-  if (env->ExceptionCheck()) {
-    jthrowable t = env->ExceptionOccurred();
-    env->ExceptionClear();
-    jclass describer_class = env->FindClass("io/glutenproject/exception/JniExceptionDescriber");
-    jmethodID describe_method =
-        env->GetStaticMethodID(describer_class, "describe", "(Ljava/lang/Throwable;)Ljava/lang/String;");
-    std::string description =
-        JStringToCString(env, (jstring)env->CallStaticObjectMethod(describer_class, describe_method, t));
-    throw gluten::GlutenException("Error during calling Java code from native code: " + description);
+template <typename T>
+static T* jniCastOrThrow(jlong handle) {
+  auto instance = reinterpret_cast<T*>(handle);
+  GLUTEN_CHECK(instance != nullptr, "FATAL: resource instance should not be null.");
+  return instance;
+}
+namespace gluten {
+
+class JniCommonState {
+ public:
+  virtual ~JniCommonState() = default;
+
+  void ensureInitialized(JNIEnv* env);
+
+  void assertInitialized();
+
+  void close();
+
+  jmethodID runtimeAwareCtxHandle();
+
+ private:
+  void initialize(JNIEnv* env);
+
+  jclass runtimeAwareClass_;
+  jmethodID runtimeAwareCtxHandle_;
+
+  JavaVM* vm_;
+  bool initialized_{false};
+  bool closed_{false};
+  std::mutex mtx_;
+};
+
+inline JniCommonState* getJniCommonState() {
+  static JniCommonState jniCommonState;
+  return &jniCommonState;
+}
+
+Runtime* getRuntime(JNIEnv* env, jobject runtimeAware);
+
+// Safe version of JNI {Get|Release}<PrimitiveType>ArrayElements routines.
+// SafeNativeArray would release the managed array elements automatically
+// during destruction.
+
+enum class JniPrimitiveArrayType {
+  kBoolean = 0,
+  kByte = 1,
+  kChar = 2,
+  kShort = 3,
+  kInt = 4,
+  kLong = 5,
+  kFloat = 6,
+  kDouble = 7
+};
+
+#define CONCATENATE(t1, t2, t3) t1##t2##t3
+
+#define DEFINE_PRIMITIVE_ARRAY(PRIM_TYPE, JAVA_TYPE, JNI_NATIVE_TYPE, NATIVE_TYPE, METHOD_VAR) \
+  template <>                                                                                  \
+  struct JniPrimitiveArray<JniPrimitiveArrayType::PRIM_TYPE> {                                 \
+    using JavaType = JAVA_TYPE;                                                                \
+    using JniNativeType = JNI_NATIVE_TYPE;                                                     \
+    using NativeType = NATIVE_TYPE;                                                            \
+                                                                                               \
+    static JniNativeType get(JNIEnv* env, JavaType javaArray) {                                \
+      return env->CONCATENATE(Get, METHOD_VAR, ArrayElements)(javaArray, nullptr);             \
+    }                                                                                          \
+                                                                                               \
+    static void release(JNIEnv* env, JavaType javaArray, JniNativeType nativeArray) {          \
+      env->CONCATENATE(Release, METHOD_VAR, ArrayElements)(javaArray, nativeArray, JNI_ABORT); \
+    }                                                                                          \
+  };
+
+template <JniPrimitiveArrayType TYPE>
+struct JniPrimitiveArray {};
+
+DEFINE_PRIMITIVE_ARRAY(kBoolean, jbooleanArray, jboolean*, bool*, Boolean)
+DEFINE_PRIMITIVE_ARRAY(kByte, jbyteArray, jbyte*, uint8_t*, Byte)
+DEFINE_PRIMITIVE_ARRAY(kChar, jcharArray, jchar*, uint16_t*, Char)
+DEFINE_PRIMITIVE_ARRAY(kShort, jshortArray, jshort*, int16_t*, Short)
+DEFINE_PRIMITIVE_ARRAY(kInt, jintArray, jint*, int32_t*, Int)
+DEFINE_PRIMITIVE_ARRAY(kLong, jlongArray, jlong*, int64_t*, Long)
+DEFINE_PRIMITIVE_ARRAY(kFloat, jfloatArray, jfloat*, float_t*, Float)
+DEFINE_PRIMITIVE_ARRAY(kDouble, jdoubleArray, jdouble*, double_t*, Double)
+
+template <JniPrimitiveArrayType TYPE>
+class SafeNativeArray {
+  using PrimitiveArray = JniPrimitiveArray<TYPE>;
+  using JavaArrayType = typename PrimitiveArray::JavaType;
+  using JniNativeArrayType = typename PrimitiveArray::JniNativeType;
+  using NativeArrayType = typename PrimitiveArray::NativeType;
+
+ public:
+  virtual ~SafeNativeArray() {
+    PrimitiveArray::release(env_, javaArray_, nativeArray_);
+  }
+
+  SafeNativeArray(const SafeNativeArray&) = delete;
+  SafeNativeArray(SafeNativeArray&&) = delete;
+  SafeNativeArray& operator=(const SafeNativeArray&) = delete;
+  SafeNativeArray& operator=(SafeNativeArray&&) = delete;
+
+  const NativeArrayType elems() const {
+    return reinterpret_cast<const NativeArrayType>(nativeArray_);
+  }
+
+  const jsize length() const {
+    return env_->GetArrayLength(javaArray_);
+  }
+
+  static SafeNativeArray<TYPE> get(JNIEnv* env, JavaArrayType javaArray) {
+    JniNativeArrayType nativeArray = PrimitiveArray::get(env, javaArray);
+    return SafeNativeArray<TYPE>(env, javaArray, nativeArray);
+  }
+
+ private:
+  SafeNativeArray(JNIEnv* env, JavaArrayType javaArray, JniNativeArrayType nativeArray)
+      : env_(env), javaArray_(javaArray), nativeArray_(nativeArray){};
+
+  JNIEnv* env_;
+  JavaArrayType javaArray_;
+  JniNativeArrayType nativeArray_;
+};
+
+#define DEFINE_SAFE_GET_PRIMITIVE_ARRAY_FUNCTIONS(PRIM_TYPE, JAVA_TYPE, METHOD_VAR)                         \
+  inline SafeNativeArray<JniPrimitiveArrayType::PRIM_TYPE> CONCATENATE(get, METHOD_VAR, ArrayElementsSafe)( \
+      JNIEnv * env, JAVA_TYPE array) {                                                                      \
+    return SafeNativeArray<JniPrimitiveArrayType::PRIM_TYPE>::get(env, array);                              \
+  }
+
+DEFINE_SAFE_GET_PRIMITIVE_ARRAY_FUNCTIONS(kBoolean, jbooleanArray, Boolean)
+DEFINE_SAFE_GET_PRIMITIVE_ARRAY_FUNCTIONS(kByte, jbyteArray, Byte)
+DEFINE_SAFE_GET_PRIMITIVE_ARRAY_FUNCTIONS(kChar, jcharArray, Char)
+DEFINE_SAFE_GET_PRIMITIVE_ARRAY_FUNCTIONS(kShort, jshortArray, Short)
+DEFINE_SAFE_GET_PRIMITIVE_ARRAY_FUNCTIONS(kInt, jintArray, Int)
+DEFINE_SAFE_GET_PRIMITIVE_ARRAY_FUNCTIONS(kLong, jlongArray, Long)
+DEFINE_SAFE_GET_PRIMITIVE_ARRAY_FUNCTIONS(kFloat, jfloatArray, Float)
+DEFINE_SAFE_GET_PRIMITIVE_ARRAY_FUNCTIONS(kDouble, jdoubleArray, Double)
+
+class JniColumnarBatchIterator : public ColumnarBatchIterator {
+ public:
+  explicit JniColumnarBatchIterator(
+      JNIEnv* env,
+      jobject jColumnarBatchItr,
+      Runtime* runtime,
+      std::shared_ptr<ArrowWriter> writer);
+
+  // singleton
+  JniColumnarBatchIterator(const JniColumnarBatchIterator&) = delete;
+  JniColumnarBatchIterator(JniColumnarBatchIterator&&) = delete;
+  JniColumnarBatchIterator& operator=(const JniColumnarBatchIterator&) = delete;
+  JniColumnarBatchIterator& operator=(JniColumnarBatchIterator&&) = delete;
+
+  virtual ~JniColumnarBatchIterator();
+
+  std::shared_ptr<ColumnarBatch> next() override;
+
+ private:
+  JavaVM* vm_;
+  jobject jColumnarBatchItr_;
+  Runtime* runtime_;
+  std::shared_ptr<ArrowWriter> writer_;
+
+  jclass serializedColumnarBatchIteratorClass_;
+  jmethodID serializedColumnarBatchIteratorHasNext_;
+  jmethodID serializedColumnarBatchIteratorNext_;
+};
+
+std::unique_ptr<JniColumnarBatchIterator> makeJniColumnarBatchIterator(
+    JNIEnv* env,
+    jobject jColumnarBatchItr,
+    Runtime* runtime,
+    std::shared_ptr<ArrowWriter> writer);
+} // namespace gluten
+
+// TODO: Move the static functions to namespace gluten
+
+static inline void backtrace() {
+  void* array[1024];
+  auto size = backtrace(array, 1024);
+  char** strings = backtrace_symbols(array, size);
+  for (size_t i = 0; i < size; ++i) {
+    LOG(INFO) << strings[i];
+  }
+  free(strings);
+}
+
+static inline arrow::Compression::type getCompressionType(JNIEnv* env, jstring codecJstr) {
+  if (codecJstr == NULL) {
+    return arrow::Compression::UNCOMPRESSED;
+  }
+  auto codec = env->GetStringUTFChars(codecJstr, JNI_FALSE);
+
+  // Convert codec string into lowercase.
+  std::string codecLower;
+  std::transform(codec, codec + std::strlen(codec), std::back_inserter(codecLower), ::tolower);
+  GLUTEN_ASSIGN_OR_THROW(auto compressionType, arrow::util::Codec::GetCompressionType(codecLower));
+
+  env->ReleaseStringUTFChars(codecJstr, codec);
+  return compressionType;
+}
+
+static inline const std::string getCompressionTypeStr(JNIEnv* env, jstring codecJstr) {
+  if (codecJstr == NULL) {
+    return "none";
+  }
+  auto codec = env->GetStringUTFChars(codecJstr, JNI_FALSE);
+
+  // Convert codec string into lowercase.
+  std::string codecLower;
+  std::transform(codec, codec + std::strlen(codec), std::back_inserter(codecLower), ::tolower);
+
+  env->ReleaseStringUTFChars(codecJstr, codec);
+  return codecLower;
+}
+
+static inline gluten::CodecBackend getCodecBackend(JNIEnv* env, jstring codecJstr) {
+  if (codecJstr == nullptr) {
+    return gluten::CodecBackend::NONE;
+  }
+  auto codecBackend = jStringToCString(env, codecJstr);
+  if (codecBackend == "qat") {
+    return gluten::CodecBackend::QAT;
+  } else if (codecBackend == "iaa") {
+    return gluten::CodecBackend::IAA;
+  } else {
+    throw std::invalid_argument("Not support this codec backend " + codecBackend);
   }
 }
 
+static inline gluten::CompressionMode getCompressionMode(JNIEnv* env, jstring compressionModeJstr) {
+  GLUTEN_DCHECK(compressionModeJstr != nullptr, "CompressionMode cannot be null");
+  auto compressionMode = jStringToCString(env, compressionModeJstr);
+  if (compressionMode == "buffer") {
+    return gluten::CompressionMode::BUFFER;
+  } else if (compressionMode == "rowvector") {
+    return gluten::CompressionMode::ROWVECTOR;
+  } else {
+    throw std::invalid_argument("Not support this compression mode " + compressionMode);
+  }
+}
+
+/*
+NOTE: the class must be thread safe
+ */
+
 class SparkAllocationListener final : public gluten::AllocationListener {
  public:
-  SparkAllocationListener(
-      JavaVM* vm,
-      jobject java_listener,
-      jmethodID java_reserve_method,
-      jmethodID java_unreserve_method,
-      int64_t block_size)
-      : vm_(vm),
-        java_reserve_method_(java_reserve_method),
-        java_unreserve_method_(java_unreserve_method),
-        block_size_(block_size) {
+  SparkAllocationListener(JavaVM* vm, jobject jListenerLocalRef, jmethodID jReserveMethod, jmethodID jUnreserveMethod)
+      : vm_(vm), jReserveMethod_(jReserveMethod), jUnreserveMethod_(jUnreserveMethod) {
     JNIEnv* env;
-    if (vm_->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION) != JNI_OK) {
-      throw gluten::GlutenException("JNIEnv was not attached to current thread");
-    }
-    java_listener_ = env->NewGlobalRef(java_listener);
+    attachCurrentThreadAsDaemonOrThrow(vm_, &env);
+    jListenerGlobalRef_ = env->NewGlobalRef(jListenerLocalRef);
   }
+
+  SparkAllocationListener(const SparkAllocationListener&) = delete;
+  SparkAllocationListener(SparkAllocationListener&&) = delete;
+  SparkAllocationListener& operator=(const SparkAllocationListener&) = delete;
+  SparkAllocationListener& operator=(SparkAllocationListener&&) = delete;
 
   ~SparkAllocationListener() override {
     JNIEnv* env;
-    if (vm_->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION) != JNI_OK) {
-      std::cerr << "SparkAllocationListener#~SparkAllocationListener(): "
-                << "JNIEnv was not attached to current thread" << std::endl;
+    if (vm_->GetEnv(reinterpret_cast<void**>(&env), jniVersion) != JNI_OK) {
+      LOG(WARNING) << "SparkAllocationListener#~SparkAllocationListener(): "
+                   << "JNIEnv was not attached to current thread";
       return;
     }
-    env->DeleteGlobalRef(java_listener_);
+    env->DeleteGlobalRef(jListenerGlobalRef_);
   }
 
-  void AllocationChanged(int64_t size) override {
-    UpdateReservation(size);
-  };
+  void allocationChanged(int64_t size) override {
+    if (size == 0) {
+      return;
+    }
+    JNIEnv* env;
+    attachCurrentThreadAsDaemonOrThrow(vm_, &env);
+    if (size < 0) {
+      env->CallLongMethod(jListenerGlobalRef_, jUnreserveMethod_, -size);
+      checkException(env);
+    } else {
+      env->CallLongMethod(jListenerGlobalRef_, jReserveMethod_, size);
+      checkException(env);
+    }
+    usedBytes_ += size;
+    while (true) {
+      int64_t savedPeakBytes = peakBytes_;
+      if (usedBytes_ <= savedPeakBytes) {
+        break;
+      }
+      // usedBytes_ > savedPeakBytes, update peak
+      if (peakBytes_.compare_exchange_weak(savedPeakBytes, usedBytes_)) {
+        break;
+      }
+    }
+  }
+
+  int64_t currentBytes() override {
+    return usedBytes_;
+  }
+
+  int64_t peakBytes() override {
+    return peakBytes_;
+  }
 
  private:
-  int64_t Reserve(int64_t diff) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    bytes_reserved_ += diff;
-    int64_t new_block_count;
-    if (bytes_reserved_ == 0) {
-      new_block_count = 0;
-    } else {
-      // ceil to get the required block number
-      new_block_count = (bytes_reserved_ - 1) / block_size_ + 1;
-    }
-    int64_t bytes_granted = (new_block_count - blocks_reserved_) * block_size_;
-    blocks_reserved_ = new_block_count;
-    if (bytes_reserved_ > max_bytes_reserved_) {
-      max_bytes_reserved_ = bytes_reserved_;
-    }
-    return bytes_granted;
+  JavaVM* vm_;
+  jobject jListenerGlobalRef_;
+  const jmethodID jReserveMethod_;
+  const jmethodID jUnreserveMethod_;
+  std::atomic_int64_t usedBytes_{0L};
+  std::atomic_int64_t peakBytes_{0L};
+};
+
+class BacktraceAllocationListener final : public gluten::AllocationListener {
+ public:
+  BacktraceAllocationListener(std::unique_ptr<gluten::AllocationListener> delegator)
+      : delegator_(std::move(delegator)) {}
+
+  void allocationChanged(int64_t bytes) override {
+    allocationBacktrace(bytes);
+    delegator_->allocationChanged(bytes);
   }
 
-  void UpdateReservation(int64_t diff) {
+ private:
+  void allocationBacktrace(int64_t bytes) {
+    allocatedBytes_ += bytes;
+    if (bytes > (64L << 20)) {
+      backtrace();
+    } else if (allocatedBytes_ >= backtraceBytes_) {
+      backtrace();
+      backtraceBytes_ += (1L << 30);
+    }
+  }
+
+  std::unique_ptr<gluten::AllocationListener> delegator_;
+  std::atomic_int64_t allocatedBytes_{};
+  std::atomic_int64_t backtraceBytes_{1L << 30};
+};
+
+class JavaRssClient : public RssClient {
+ public:
+  JavaRssClient(JavaVM* vm, jobject javaRssShuffleWriter, jmethodID javaPushPartitionDataMethod)
+      : vm_(vm), javaPushPartitionData_(javaPushPartitionDataMethod) {
     JNIEnv* env;
-    if (vm_->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION) != JNI_OK) {
+    if (vm_->GetEnv(reinterpret_cast<void**>(&env), jniVersion) != JNI_OK) {
       throw gluten::GlutenException("JNIEnv was not attached to current thread");
     }
-    int64_t granted = Reserve(diff);
-    if (granted == 0) {
-      return;
-    }
-    if (granted < 0) {
-      env->CallObjectMethod(java_listener_, java_unreserve_method_, -granted);
-      CheckException(env);
-      return;
-    }
-    env->CallObjectMethod(java_listener_, java_reserve_method_, granted);
-    CheckException(env);
+
+    javaRssShuffleWriter_ = env->NewGlobalRef(javaRssShuffleWriter);
+    array_ = env->NewByteArray(1024 * 1024);
+    array_ = static_cast<jbyteArray>(env->NewGlobalRef(array_));
   }
 
+  ~JavaRssClient() {
+    JNIEnv* env;
+    if (vm_->GetEnv(reinterpret_cast<void**>(&env), jniVersion) != JNI_OK) {
+      LOG(WARNING) << "JavaRssClient#~JavaRssClient(): "
+                   << "JNIEnv was not attached to current thread";
+      return;
+    }
+    env->DeleteGlobalRef(javaRssShuffleWriter_);
+    jbyte* byteArray = env->GetByteArrayElements(array_, NULL);
+    env->ReleaseByteArrayElements(array_, byteArray, JNI_ABORT);
+    env->DeleteGlobalRef(array_);
+  }
+
+  int32_t pushPartitionData(int32_t partitionId, const char* bytes, int64_t size) override {
+    JNIEnv* env;
+    if (vm_->GetEnv(reinterpret_cast<void**>(&env), jniVersion) != JNI_OK) {
+      throw gluten::GlutenException("JNIEnv was not attached to current thread");
+    }
+    jint length = env->GetArrayLength(array_);
+    if (size > length) {
+      jbyte* byteArray = env->GetByteArrayElements(array_, NULL);
+      env->ReleaseByteArrayElements(array_, byteArray, JNI_ABORT);
+      env->DeleteGlobalRef(array_);
+      array_ = env->NewByteArray(size);
+      array_ = static_cast<jbyteArray>(env->NewGlobalRef(array_));
+    }
+    env->SetByteArrayRegion(array_, 0, size, (jbyte*)bytes);
+    jint javaBytesSize = env->CallIntMethod(javaRssShuffleWriter_, javaPushPartitionData_, partitionId, array_, size);
+    checkException(env);
+    return static_cast<int32_t>(javaBytesSize);
+  }
+
+  void stop() override {}
+
+ private:
   JavaVM* vm_;
-  jobject java_listener_;
-  jmethodID java_reserve_method_;
-  jmethodID java_unreserve_method_;
-  int64_t block_size_;
-  int64_t blocks_reserved_ = 0L;
-  int64_t bytes_reserved_ = 0L;
-  int64_t max_bytes_reserved_ = 0L;
-  std::mutex mutex_;
+  jobject javaRssShuffleWriter_;
+  jmethodID javaPushPartitionData_;
+  jbyteArray array_;
 };

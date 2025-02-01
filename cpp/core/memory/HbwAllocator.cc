@@ -18,23 +18,35 @@
 #include "HbwAllocator.h"
 
 #include <hbwmalloc.h>
+#include <cstdlib>
+#include <iostream>
 #include "MemoryAllocator.h"
 
 namespace gluten {
 
-bool HbwMemoryAllocator::Allocate(int64_t size, void** out) {
+std::shared_ptr<MemoryAllocator> HbwMemoryAllocator::newInstance() {
+  auto memkindHbwNodes = std::getenv("MEMKIND_HBW_NODES");
+  if (memkindHbwNodes == nullptr) {
+    std::cout << "MEMKIND_HBW_NODES not set. Use StdMemoryAllocator." << std::endl;
+    return std::make_shared<StdMemoryAllocator>();
+  }
+  std::cout << "MEMKIND_HBW_NODES set. Use StdMemoryAllocator." << std::endl;
+  return std::make_shared<HbwMemoryAllocator>();
+}
+
+bool HbwMemoryAllocator::allocate(int64_t size, void** out) {
   *out = hbw_malloc(size);
   bytes_ += size;
   return true;
 }
 
-bool HbwMemoryAllocator::AllocateZeroFilled(int64_t nmemb, int64_t size, void** out) {
+bool HbwMemoryAllocator::allocateZeroFilled(int64_t nmemb, int64_t size, void** out) {
   *out = hbw_calloc(nmemb, size);
   bytes_ += size;
   return true;
 }
 
-bool HbwMemoryAllocator::AllocateAligned(uint16_t alignment, int64_t size, void** out) {
+bool HbwMemoryAllocator::allocateAligned(uint64_t alignment, int64_t size, void** out) {
   if (hbw_posix_memalign(out, alignment, size) != 0) {
     return false;
   }
@@ -42,35 +54,39 @@ bool HbwMemoryAllocator::AllocateAligned(uint16_t alignment, int64_t size, void*
   return true;
 }
 
-bool HbwMemoryAllocator::Reallocate(void* p, int64_t size, int64_t new_size, void** out) {
-  *out = hbw_realloc(p, new_size);
-  bytes_ += (new_size - size);
+bool HbwMemoryAllocator::reallocate(void* p, int64_t size, int64_t newSize, void** out) {
+  *out = hbw_realloc(p, newSize);
+  bytes_ += (newSize - size);
   return true;
 }
 
-bool HbwMemoryAllocator::ReallocateAligned(void* p, uint16_t alignment, int64_t size, int64_t new_size, void** out) {
-  if (new_size <= 0) {
+bool HbwMemoryAllocator::reallocateAligned(void* p, uint64_t alignment, int64_t size, int64_t newSize, void** out) {
+  if (newSize <= 0) {
     return false;
   }
-  void* reallocated_p = nullptr;
-  if (hbw_posix_memalign(&reallocated_p, alignment, new_size) != 0) {
+  void* reallocatedP = nullptr;
+  if (hbw_posix_memalign(&reallocatedP, alignment, newSize) != 0) {
     return false;
   }
-  memcpy(reallocated_p, p, std::min(size, new_size));
+  memcpy(reallocatedP, p, std::min(size, newSize));
   hbw_free(p);
-  *out = reallocated_p;
-  bytes_ += (new_size - size);
+  *out = reallocatedP;
+  bytes_ += (newSize - size);
   return true;
 }
 
-bool HbwMemoryAllocator::Free(void* p, int64_t size) {
+bool HbwMemoryAllocator::free(void* p, int64_t size) {
   hbw_free(p);
   bytes_ -= size;
   return true;
 }
 
-int64_t HbwMemoryAllocator::GetBytes() const {
+int64_t HbwMemoryAllocator::getBytes() const {
   return bytes_;
+}
+
+int64_t HbwMemoryAllocator::peakBytes() const {
+  return 0;
 }
 
 } // namespace gluten

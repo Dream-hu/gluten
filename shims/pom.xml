@@ -18,9 +18,9 @@
   <modelVersion>4.0.0</modelVersion>
 
   <parent>
-    <groupId>io.glutenproject</groupId>
+    <groupId>org.apache.gluten</groupId>
     <artifactId>gluten-parent</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
+    <version>1.4.0-SNAPSHOT</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
 
@@ -28,11 +28,15 @@
   <name>Gluten Shims</name>
   <packaging>pom</packaging>
 
+  <modules>
+    <module>common</module>
+  </modules>
+
   <dependencies>
     <dependency>
       <groupId>org.scalatest</groupId>
       <artifactId>scalatest_${scala.binary.version}</artifactId>
-      <version>3.2.3</version>
+      <version>3.2.16</version>
       <scope>test</scope>
     </dependency>
     <!--The parent POM excluded these jars. Add back for testing-->
@@ -42,33 +46,62 @@
       <version>1.7.30</version>
       <scope>test</scope>
     </dependency>
+
     <dependency>
       <groupId>org.apache.hadoop</groupId>
       <artifactId>hadoop-client</artifactId>
-      <version>${hadoop.version}</version>
-      <scope>test</scope>
     </dependency>
   </dependencies>
 
   <profiles>
     <profile>
       <id>spark-3.2</id>
-      <activation>
-        <activeByDefault>true</activeByDefault>
-      </activation>
-      <properties>
-      </properties>
       <modules>
-        <module>common</module>
         <module>spark32</module>
       </modules>
     </profile>
     <profile>
       <id>spark-3.3</id>
       <modules>
-        <module>common</module>
         <module>spark33</module>
       </modules>
     </profile>
+    <profile>
+      <id>spark-3.4</id>
+      <modules>
+        <module>spark34</module>
+      </modules>
+    </profile>
+    <profile>
+      <id>spark-3.5</id>
+      <modules>
+        <module>spark35</module>
+      </modules>
+    </profile>
+    <profile>
+      <id>default</id>
+      <activation>
+        <activeByDefault>true</activeByDefault>
+      </activation>
+      <modules>
+        <module>spark34</module>
+      </modules>
+    </profile>
   </profiles>
+
+  <build>
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>org.scalastyle</groupId>
+          <artifactId>scalastyle-maven-plugin</artifactId>
+        </plugin>
+        <plugin>
+          <groupId>com.diffplug.spotless</groupId>
+          <artifactId>spotless-maven-plugin</artifactId>
+          <version>${spotless.version}</version>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+  </build>
 </project>

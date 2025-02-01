@@ -21,6 +21,7 @@
 #include "arrow/table.h"
 #include "arrow/util/type_fwd.h"
 
+namespace gluten {
 arrow::Status ArrowWriter::initWriter(arrow::Schema& schema) {
   if (writer_ != nullptr) {
     return arrow::Status::OK();
@@ -32,13 +33,13 @@ arrow::Status ArrowWriter::initWriter(arrow::Schema& schema) {
       WriterProperties::Builder().compression(arrow::Compression::SNAPPY)->build();
 
   // Opt to store Arrow schema for easier reads back into Arrow
-  std::shared_ptr<ArrowWriterProperties> arrow_props = ArrowWriterProperties::Builder().store_schema()->build();
+  std::shared_ptr<ArrowWriterProperties> arrowProps = ArrowWriterProperties::Builder().store_schema()->build();
 
   // Create a writer
   std::shared_ptr<arrow::io::FileOutputStream> outfile;
   ARROW_ASSIGN_OR_RAISE(outfile, arrow::io::FileOutputStream::Open(path_));
-  ARROW_RETURN_NOT_OK(
-      parquet::arrow::FileWriter::Open(schema, arrow::default_memory_pool(), outfile, props, arrow_props, &writer_));
+  ARROW_ASSIGN_OR_RAISE(
+      writer_, parquet::arrow::FileWriter::Open(schema, arrow::default_memory_pool(), outfile, props, arrowProps));
   return arrow::Status::OK();
 }
 
@@ -50,9 +51,15 @@ arrow::Status ArrowWriter::writeInBatches(std::shared_ptr<arrow::RecordBatch> ba
 }
 
 arrow::Status ArrowWriter::closeWriter() {
-  // Write file footer and close
+  // Write file footer and close.
   if (writer_ != nullptr) {
     ARROW_RETURN_NOT_OK(writer_->Close());
   }
+  closed_ = true;
   return arrow::Status::OK();
 }
+
+bool ArrowWriter::closed() const {
+  return closed_;
+}
+} // namespace gluten

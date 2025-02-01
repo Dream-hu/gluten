@@ -17,12 +17,35 @@
 
 #pragma once
 
+#include "arrow/memory_pool.h"
+
 #include "MemoryAllocator.h"
 
 namespace gluten {
 
-std::shared_ptr<arrow::MemoryPool> AsWrappedArrowMemoryPool(MemoryAllocator* allocator);
+/// This pool was not tracked by Spark, should only used in test.
+std::shared_ptr<arrow::MemoryPool> defaultArrowMemoryPool();
 
-std::shared_ptr<arrow::MemoryPool> GetDefaultWrappedArrowMemoryPool();
+class ArrowMemoryPool final : public arrow::MemoryPool {
+ public:
+  explicit ArrowMemoryPool(MemoryAllocator* allocator) : allocator_(allocator) {}
+
+  arrow::Status Allocate(int64_t size, int64_t alignment, uint8_t** out) override;
+
+  arrow::Status Reallocate(int64_t oldSize, int64_t newSize, int64_t alignment, uint8_t** ptr) override;
+
+  void Free(uint8_t* buffer, int64_t size, int64_t alignment) override;
+
+  int64_t bytes_allocated() const override;
+
+  int64_t total_bytes_allocated() const override;
+
+  int64_t num_allocations() const override;
+
+  std::string backend_name() const override;
+
+ private:
+  MemoryAllocator* allocator_;
+};
 
 } // namespace gluten

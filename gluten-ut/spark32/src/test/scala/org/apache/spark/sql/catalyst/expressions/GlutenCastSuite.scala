@@ -14,13 +14,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.spark.sql.catalyst.expressions
 
 import org.apache.spark.sql.GlutenTestsTrait
+import org.apache.spark.sql.catalyst.util.DateTimeTestUtils.{withDefaultTimeZone, ALL_TIMEZONES, UTC, UTC_OPT}
+import org.apache.spark.sql.catalyst.util.DateTimeUtils.{fromJavaTimestamp, millisToMicros, TimeZoneUTC}
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 
-import java.sql.Date
+import java.sql.{Date, Timestamp}
+import java.util.Calendar
 
 class GlutenCastSuite extends CastSuite with GlutenTestsTrait {
   override def cast(v: Any, targetType: DataType, timeZoneId: Option[String] = None): CastBase = {
@@ -39,15 +42,22 @@ class GlutenCastSuite extends CastSuite with GlutenTestsTrait {
   UDTRegistration.register(classOf[IExampleBaseType].getName, classOf[ExampleBaseTypeUDT].getName)
   UDTRegistration.register(classOf[IExampleSubType].getName, classOf[ExampleSubTypeUDT].getName)
 
-  test("missing cases - from boolean") {
+  testGluten("missing cases - from boolean") {
     (DataTypeTestUtils.numericTypeWithoutDecimal + BooleanType).foreach {
       t =>
-        checkEvaluation(cast(true, t), 1)
-        checkEvaluation(cast(false, t), 0)
+        t match {
+          case BooleanType =>
+            checkEvaluation(cast(cast(true, BooleanType), t), true)
+            checkEvaluation(cast(cast(false, BooleanType), t), false)
+          case _ =>
+            checkEvaluation(cast(cast(true, BooleanType), t), 1)
+            checkEvaluation(cast(cast(false, BooleanType), t), 0)
+        }
+
     }
   }
 
-  test("missing cases - from byte") {
+  testGluten("missing cases - from byte") {
     DataTypeTestUtils.numericTypeWithoutDecimal.foreach {
       t =>
         checkEvaluation(cast(cast(0, ByteType), t), 0)
@@ -56,7 +66,7 @@ class GlutenCastSuite extends CastSuite with GlutenTestsTrait {
     }
   }
 
-  test("missing cases - from short") {
+  testGluten("missing cases - from short") {
     DataTypeTestUtils.numericTypeWithoutDecimal.foreach {
       t =>
         checkEvaluation(cast(cast(0, ShortType), t), 0)
@@ -65,8 +75,82 @@ class GlutenCastSuite extends CastSuite with GlutenTestsTrait {
     }
   }
 
-  test("missing cases - date self check") {
+  testGluten("missing cases - date self check") {
     val d = Date.valueOf("1970-01-01")
     checkEvaluation(cast(d, DateType), d)
+  }
+
+  testGluten("data type casting") {
+    val sd = "1970-01-01"
+    val d = Date.valueOf(sd)
+    val zts = sd + " 00:00:00"
+    val sts = sd + " 00:00:02"
+    val nts = sts + ".1"
+    val ts = withDefaultTimeZone(UTC)(Timestamp.valueOf(nts))
+
+    for (tz <- ALL_TIMEZONES) {
+      withSQLConf(
+        SQLConf.SESSION_LOCAL_TIMEZONE.key -> tz.getId
+      ) {
+        val timeZoneId = Option(tz.getId)
+        var c = Calendar.getInstance(TimeZoneUTC)
+        c.set(2015, 2, 8, 2, 30, 0)
+        checkEvaluation(
+          cast(
+            cast(new Timestamp(c.getTimeInMillis), StringType, timeZoneId),
+            TimestampType,
+            timeZoneId),
+          millisToMicros(c.getTimeInMillis))
+        c = Calendar.getInstance(TimeZoneUTC)
+        c.set(2015, 10, 1, 2, 30, 0)
+        checkEvaluation(
+          cast(
+            cast(new Timestamp(c.getTimeInMillis), StringType, timeZoneId),
+            TimestampType,
+            timeZoneId),
+          millisToMicros(c.getTimeInMillis))
+      }
+    }
+
+    checkEvaluation(cast("abdef", StringType), "abdef")
+    checkEvaluation(cast("12.65", DecimalType.SYSTEM_DEFAULT), Decimal(12.65))
+
+    checkEvaluation(cast(cast(sd, DateType), StringType), sd)
+    checkEvaluation(cast(cast(d, StringType), DateType), 0)
+
+    withSQLConf(
+      SQLConf.SESSION_LOCAL_TIMEZONE.key -> UTC_OPT.get
+    ) {
+      checkEvaluation(cast(cast(nts, TimestampType, UTC_OPT), StringType, UTC_OPT), nts)
+      checkEvaluation(
+        cast(cast(ts, StringType, UTC_OPT), TimestampType, UTC_OPT),
+        fromJavaTimestamp(ts))
+
+      // all convert to string type to check
+      checkEvaluation(
+        cast(cast(cast(nts, TimestampType, UTC_OPT), DateType, UTC_OPT), StringType),
+        sd)
+      checkEvaluation(
+        cast(cast(cast(ts, DateType, UTC_OPT), TimestampType, UTC_OPT), StringType, UTC_OPT),
+        zts)
+    }
+
+    checkEvaluation(cast(cast("abdef", BinaryType), StringType), "abdef")
+
+    checkEvaluation(
+      cast(
+        cast(cast(cast(cast(cast("5", ByteType), ShortType), IntegerType), FloatType), DoubleType),
+        LongType),
+      5.toLong)
+
+    checkEvaluation(cast("23", DoubleType), 23d)
+    checkEvaluation(cast("23", IntegerType), 23)
+    checkEvaluation(cast("23", FloatType), 23f)
+    checkEvaluation(cast("23", DecimalType.USER_DEFAULT), Decimal(23))
+    checkEvaluation(cast("23", ByteType), 23.toByte)
+    checkEvaluation(cast("23", ShortType), 23.toShort)
+    checkEvaluation(cast(123, IntegerType), 123)
+
+    checkEvaluation(cast(Literal.create(null, IntegerType), ShortType), null)
   }
 }

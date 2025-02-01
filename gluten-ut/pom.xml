@@ -18,24 +18,36 @@
   <modelVersion>4.0.0</modelVersion>
 
   <parent>
-    <groupId>io.glutenproject</groupId>
+    <groupId>org.apache.gluten</groupId>
     <artifactId>gluten-parent</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
+    <version>1.4.0-SNAPSHOT</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
 
+  <modules>
+    <module>common</module>
+    <module>test</module>
+  </modules>
+
   <artifactId>gluten-ut</artifactId>
   <packaging>pom</packaging>
-  <name>Gluten Unit Test</name>
+  <name>Gluten Unit Test Parent</name>
 
   <dependencies>
-    <!-- put gluten-core at first so that overwritten spark classes (such as BatchScanExec,
+    <!-- put gluten-substrait at first so that overwritten spark classes (such as BatchScanExec,
          EmptyRDD, etc.) can be loaded first -->
     <dependency>
-      <groupId>io.glutenproject</groupId>
-      <artifactId>gluten-core</artifactId>
+      <groupId>org.apache.gluten</groupId>
+      <artifactId>gluten-substrait</artifactId>
       <version>${project.version}</version>
       <scope>compile</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.gluten</groupId>
+      <artifactId>gluten-substrait</artifactId>
+      <version>${project.version}</version>
+      <type>test-jar</type>
+      <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>org.apache.spark</groupId>
@@ -54,12 +66,22 @@
     </dependency>
     <dependency>
       <groupId>org.apache.spark</groupId>
-      <artifactId>spark-hive-thriftserver_${scala.binary.version}</artifactId>
+      <artifactId>spark-hive_${scala.binary.version}</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.hadoop</groupId>
+      <artifactId>hadoop-client</artifactId>
       <scope>provided</scope>
     </dependency>
     <dependency>
       <groupId>org.apache.spark</groupId>
       <artifactId>spark-core_${scala.binary.version}</artifactId>
+      <type>test-jar</type>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.spark</groupId>
+      <artifactId>spark-hive_${scala.binary.version}</artifactId>
       <type>test-jar</type>
     </dependency>
     <dependency>
@@ -74,14 +96,14 @@
     </dependency>
     <dependency>
       <groupId>io.delta</groupId>
-      <artifactId>delta-core_${scala.binary.version}</artifactId>
-      <scope>provided</scope>
+      <artifactId>${delta.package.name}_${scala.binary.version}</artifactId>
+      <scope>test</scope>
     </dependency>
 
     <dependency>
       <groupId>org.scalacheck</groupId>
       <artifactId>scalacheck_${scala.binary.version}</artifactId>
-      <version>1.13.5</version>
+      <version>1.17.0</version>
       <scope>test</scope>
     </dependency>
     <dependency>
@@ -98,7 +120,7 @@
     <dependency>
       <groupId>org.mockito</groupId>
       <artifactId>mockito-core</artifactId>
-      <version>2.23.4</version>
+      <version>4.6.1</version>
       <scope>test</scope>
     </dependency>
     <dependency>
@@ -109,61 +131,91 @@
     <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-databind</artifactId>
-      <scope>test</scope>
+      <version>${fasterxml.version}</version>
     </dependency>
     <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-annotations</artifactId>
-      <scope>test</scope>
+      <version>${fasterxml.version}</version>
     </dependency>
     <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-core</artifactId>
-      <scope>test</scope>
+      <version>${fasterxml.version}</version>
     </dependency>
     <dependency>
       <groupId>com.fasterxml.jackson.module</groupId>
       <artifactId>jackson-module-scala_${scala.binary.version}</artifactId>
-      <scope>test</scope>
+      <version>${fasterxml.version}</version>
     </dependency>
     <dependency>
       <groupId>org.scalatestplus</groupId>
-      <artifactId>scalatestplus-mockito_2.12</artifactId>
+      <artifactId>scalatestplus-mockito_${scala.binary.version}</artifactId>
       <version>1.0.0-M2</version>
       <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>org.scalatestplus</groupId>
-      <artifactId>scalatestplus-scalacheck_2.12</artifactId>
+      <artifactId>scalatestplus-scalacheck_${scala.binary.version}</artifactId>
       <version>3.1.0.0-RC2</version>
       <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>commons-io</groupId>
       <artifactId>commons-io</artifactId>
-      <version>2.11.0</version>
+      <version>2.14.0</version>
       <scope>provided</scope>
     </dependency>
   </dependencies>
 
+  <build>
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>net.alchim31.maven</groupId>
+          <artifactId>scala-maven-plugin</artifactId>
+          <configuration>
+            <displayCmd>true</displayCmd>
+            <jvmArgs>
+              <jvmArg>-Xss128m</jvmArg>
+            </jvmArgs>
+          </configuration>
+        </plugin>
+        <plugin>
+          <groupId>org.scalastyle</groupId>
+          <artifactId>scalastyle-maven-plugin</artifactId>
+        </plugin>
+        <plugin>
+          <groupId>com.diffplug.spotless</groupId>
+          <artifactId>spotless-maven-plugin</artifactId>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+  </build>
+
   <profiles>
     <profile>
       <id>spark-3.2</id>
-      <activation>
-        <activeByDefault>true</activeByDefault>
-      </activation>
-      <properties>
-      </properties>
       <modules>
         <module>spark32</module>
-        <module>common</module>
       </modules>
     </profile>
     <profile>
       <id>spark-3.3</id>
       <modules>
         <module>spark33</module>
-        <module>common</module>
+      </modules>
+    </profile>
+    <profile>
+      <id>spark-3.4</id>
+      <modules>
+        <module>spark34</module>
+      </modules>
+    </profile>
+    <profile>
+      <id>spark-3.5</id>
+      <modules>
+        <module>spark35</module>
       </modules>
     </profile>
   </profiles>
