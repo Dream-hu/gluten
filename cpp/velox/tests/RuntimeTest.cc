@@ -108,7 +108,7 @@ class DummyRuntime final : public Runtime {
   }
   std::shared_ptr<ShuffleReader> createShuffleReader(
       std::shared_ptr<arrow::Schema> schema,
-      ShuffleReaderOptions options) override {
+      const std::shared_ptr<ShuffleReaderOptions>& options) override {
     throw GlutenException("Not yet implemented");
   }
   std::unique_ptr<ColumnarBatchSerializer> createColumnarBatchSerializer(struct ArrowSchema* cSchema) override {

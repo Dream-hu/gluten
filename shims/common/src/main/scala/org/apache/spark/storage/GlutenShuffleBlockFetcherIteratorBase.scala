@@ -14,25 +14,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.gluten.vectorized
-
-import org.apache.spark.storage.BlockId
+package org.apache.spark.storage
 
 import java.io.InputStream
 
-case class ShuffleStreamReader(streams: Iterator[(BlockId, InputStream)]) {
-  private val jniStreams = streams.map {
-    case (blockId, in) =>
-      JniByteInputStreams.create(in)
-  }
-
-  // Called from native side to get the next stream. The native caller should make sure
-  // the streams are properly closed.
-  def nextStream(): JniByteInputStream = {
-    if (jniStreams.hasNext) {
-      jniStreams.next
-    } else {
-      null
-    }
-  }
+abstract class GlutenShuffleBlockFetcherIteratorBase extends Iterator[(BlockId, InputStream)] {
+  // For the native async reader, the iterator can be read by multiple native threads.
+  // The iterator may be fully consumed while the native reader threads are still running.
+  // In this case, we cannot use `toCompletionIterator` to invoke the `onCompleteCallback`.
+  // Instead, we need to wait for all async reader threads to finish before calling the
+  // `onCompleteCallback`.
+  def onComplete(): Unit
 }

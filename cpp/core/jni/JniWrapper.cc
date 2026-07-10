@@ -15,21 +15,10 @@
  * limitations under the License.
  */
 
-#include <jni.h>
-#include <algorithm>
-#include <cstdint>
-#include <filesystem>
-#include <limits>
-
 #include "compute/Runtime.h"
 #include "config/GlutenConfig.h"
 #include "jni/JniCommon.h"
 #include "jni/JniError.h"
-
-#include <arrow/c/bridge.h>
-#include <google/protobuf/stubs/common.h>
-#include <optional>
-#include <string>
 #include "memory/AllocationListener.h"
 #include "memory/SplitAwareColumnarBatchIterator.h"
 #include "operators/serializer/ColumnarBatchSerializer.h"
@@ -40,6 +29,16 @@
 #include "shuffle/Utils.h"
 #include "utils/ArrowStatus.h"
 #include "utils/StringUtil.h"
+
+#include <arrow/c/bridge.h>
+#include <google/protobuf/stubs/common.h>
+#include <jni.h>
+#include <algorithm>
+#include <cstdint>
+#include <filesystem>
+#include <limits>
+#include <optional>
+#include <string>
 
 using namespace gluten;
 
@@ -1283,28 +1282,36 @@ JNIEXPORT void JNICALL Java_org_apache_gluten_vectorized_OnHeapJniByteInputStrea
 JNIEXPORT jlong JNICALL Java_org_apache_gluten_vectorized_ShuffleReaderJniWrapper_make( // NOLINT
     JNIEnv* env,
     jobject wrapper,
+    jstring shuffleWriterType,
     jlong cSchema,
     jstring compressionType,
     jstring compressionBackend,
     jint batchSize,
     jlong readerBufferSize,
     jlong deserializerBufferSize,
-    jstring shuffleWriterType,
-    jboolean enableHashShuffleReaderStreamMerge) {
+    jboolean enableHashShuffleReaderStreamMerge,
+    jboolean enableAsyncReader,
+    jlong gpuAsyncReaderMaxPrefetchBytes) {
   JNI_METHOD_START
   auto ctx = getRuntime(env, wrapper);
 
-  ShuffleReaderOptions options = ShuffleReaderOptions{};
-  options.compressionType = getCompressionType(env, compressionType);
-  if (compressionType != nullptr) {
-    options.codecBackend = getCodecBackend(env, compressionBackend);
-  }
-  options.batchSize = batchSize;
-  options.readerBufferSize = readerBufferSize;
-  options.deserializerBufferSize = deserializerBufferSize;
-  options.enableHashShuffleReaderStreamMerge = enableHashShuffleReaderStreamMerge;
+  auto options = std::make_shared<ShuffleReaderOptions>();
+  options->shuffleWriterType = ShuffleWriter::stringToType(jStringToCString(env, shuffleWriterType));
 
-  options.shuffleWriterType = ShuffleWriter::stringToType(jStringToCString(env, shuffleWriterType));
+  options->compressionType = getCompressionType(env, compressionType);
+  if (compressionType != nullptr) {
+    options->codecBackend = getCodecBackend(env, compressionBackend);
+  }
+  options->batchSize = batchSize;
+  options->readerBufferSize = readerBufferSize;
+  options->deserializerBufferSize = deserializerBufferSize;
+  options->enableHashShuffleReaderStreamMerge = enableHashShuffleReaderStreamMerge;
+
+#ifdef GLUTEN_ENABLE_GPU
+  options->enableGpuAsyncReader = enableAsyncReader;
+  options->gpuAsyncReaderMaxPrefetchBytes = gpuAsyncReaderMaxPrefetchBytes;
+#endif
+
   std::shared_ptr<arrow::Schema> schema =
       arrowGetOrThrow(arrow::ImportSchema(reinterpret_cast<struct ArrowSchema*>(cSchema)));
 
@@ -1339,6 +1346,16 @@ JNIEXPORT void JNICALL Java_org_apache_gluten_vectorized_ShuffleReaderJniWrapper
   env->CallVoidMethod(metrics, shuffleReaderMetricsSetDeserializeTime, reader->getDeserializeTime());
 
   checkException(env);
+  JNI_METHOD_END()
+}
+
+JNIEXPORT void JNICALL Java_org_apache_gluten_vectorized_ShuffleReaderJniWrapper_stop( // NOLINT
+    JNIEnv* env,
+    jobject wrapper,
+    jlong shuffleReaderHandle) {
+  JNI_METHOD_START
+  auto reader = ObjectStore::retrieve<ShuffleReader>(shuffleReaderHandle);
+  reader->stop();
   JNI_METHOD_END()
 }
 
