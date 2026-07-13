@@ -326,14 +326,13 @@ public class GlutenOneInputOperator<IN, OUT> extends TableStreamOperator<OUT>
 
   @Override
   public void prepareSnapshotPreBarrier(long checkpointId) throws Exception {
-    // TODO: notify velox
     super.prepareSnapshotPreBarrier(checkpointId);
   }
 
   @Override
   public void snapshotState(StateSnapshotContext context) throws Exception {
     // TODO: implement it
-    task.snapshotState(0);
+    task.snapshotState(context.getCheckpointId());
     super.snapshotState(context);
   }
 

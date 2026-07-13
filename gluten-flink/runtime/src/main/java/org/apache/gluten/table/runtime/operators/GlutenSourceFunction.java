@@ -18,7 +18,7 @@ package org.apache.gluten.table.runtime.operators;
 
 import org.apache.gluten.table.runtime.config.VeloxConnectorConfig;
 import org.apache.gluten.table.runtime.config.VeloxQueryConfig;
-import org.apache.gluten.table.runtime.metrics.SourceTaskMetrics;
+import org.apache.gluten.table.runtime.metrics.SourceOperatorMetrics;
 import org.apache.gluten.vectorized.FlinkRowToVLVectorConvertor;
 
 import io.github.zhztheplayer.velox4j.connector.ConnectorSplit;
@@ -33,6 +33,8 @@ import io.github.zhztheplayer.velox4j.stateful.StatefulRecord;
 import io.github.zhztheplayer.velox4j.stateful.StatefulWatermark;
 import io.github.zhztheplayer.velox4j.type.RowType;
 
+import org.apache.flink.api.common.state.ListState;
+import org.apache.flink.api.common.state.ListStateDescriptor;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.state.FunctionInitializationContext;
 import org.apache.flink.runtime.state.FunctionSnapshotContext;
@@ -44,6 +46,7 @@ import org.apache.flink.table.data.RowData;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -64,8 +67,10 @@ public class GlutenSourceFunction<OUT> extends RichParallelSourceFunction<OUT>
   private GlutenSessionResource sessionResource;
   private Query query;
   private SerialTask task;
-  private SourceTaskMetrics taskMetrics;
+  private SourceOperatorMetrics metrics;
   private final Class<OUT> outClass;
+  private transient ListState<String> checkpointState;
+  private transient String[] restoredCheckpointRecords = new String[0];
 
   public GlutenSourceFunction(
       StatefulPlanNode planNode,
@@ -115,7 +120,7 @@ public class GlutenSourceFunction<OUT> extends RichParallelSourceFunction<OUT>
         default:
           return;
       }
-      taskMetrics.updateMetrics(task, id);
+      metrics.updateMetrics(task, id);
     }
   }
 
@@ -208,15 +213,29 @@ public class GlutenSourceFunction<OUT> extends RichParallelSourceFunction<OUT>
 
   @Override
   public void snapshotState(FunctionSnapshotContext context) throws Exception {
-    // TODO: implement it
-    this.task.snapshotState(0);
+    checkpointState.clear();
+    String[] checkpointRecords = this.task.snapshotState(context.getCheckpointId());
+    for (String checkpointRecord : checkpointRecords) {
+      checkpointState.add(checkpointRecord);
+    }
   }
 
   @Override
   public void initializeState(FunctionInitializationContext context) throws Exception {
+    checkpointState =
+        context
+            .getOperatorStateStore()
+            .getListState(
+                new ListStateDescriptor<>("gluten-native-source-checkpoint", String.class));
+    if (context.isRestored()) {
+      List<String> records = new ArrayList<>();
+      for (String checkpointRecord : checkpointState.get()) {
+        records.add(checkpointRecord);
+      }
+      restoredCheckpointRecords = records.toArray(new String[0]);
+    }
     initSession();
-    // TODO: implement it
-    this.task.initializeState(0, null);
+    this.task.initializeState(0, null, restoredCheckpointRecords);
   }
 
   public String[] notifyCheckpointComplete(long checkpointId) throws Exception {
@@ -252,6 +271,6 @@ public class GlutenSourceFunction<OUT> extends RichParallelSourceFunction<OUT>
     task = session.queryOps().execute(query);
     task.addSplit(id, activeSplit);
     task.noMoreSplits(id);
-    taskMetrics = new SourceTaskMetrics(getRuntimeContext().getMetricGroup());
+    metrics = new SourceOperatorMetrics(getRuntimeContext().getMetricGroup());
   }
 }
