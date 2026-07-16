@@ -234,8 +234,9 @@ class VeloxTestSettings extends BackendTestSettings {
   enableSuite[GlutenCsvExpressionsSuite]
   enableSuite[GlutenDynamicPruningSubquerySuite]
   enableSuite[GlutenExprIdSuite]
-  // GlutenExpressionEvalHelperSuite is not enabled: it validates Spark's ExpressionEvalHelper
-  // contract, while Gluten overrides checkEvaluation/checkExceptionInExpression.
+  disableSuite[GlutenExpressionEvalHelperSuite](
+    "Validates Spark's ExpressionEvalHelper contract, while Gluten overrides " +
+      "checkEvaluation/checkExceptionInExpression")
   enableSuite[GlutenExpressionImplUtilsSuite]
   enableSuite[GlutenExpressionSQLBuilderSuite]
   enableSuite[GlutenExpressionSetSuite]
@@ -243,15 +244,17 @@ class VeloxTestSettings extends BackendTestSettings {
   enableSuite[GlutenHexSuite]
   enableSuite[GlutenMutableProjectionSuite]
   enableSuite[GlutenNamedExpressionSuite]
-  // GlutenObjectExpressionsSuite is not enabled: object/encoder interpreted execution is
-  // JVM-side coverage and currently fails under Gluten's expression evaluation harness.
+  disableSuite[GlutenObjectExpressionsSuite](
+    "Object/encoder interpreted execution is JVM-side coverage and currently fails under " +
+      "Gluten's expression evaluation harness")
   enableSuite[GlutenOrderingSuite]
-  // GlutenScalaUDFSuite is not enabled: ScalaUDF executes on the JVM/fallback path, so
-  // this parent suite has limited Velox coverage value and still has one inherited failure.
+  disableSuite[GlutenScalaUDFSuite](
+    "ScalaUDF executes on the JVM/fallback path, so this parent suite has limited Velox " +
+      "coverage value and still has one inherited failure")
   enableSuite[GlutenSchemaPruningSuite]
   enableSuite[GlutenSelectedFieldSuite]
-  // GlutenSubExprEvaluationRuntimeSuite is removed because SubExprEvaluationRuntimeSuite
-  // is in test-jar without shaded Guava, while SubExprEvaluationRuntime is shaded.
+  disableSuite[GlutenSubExprEvaluationRuntimeSuite](
+    "Spark's test JAR uses unshaded Guava, while SubExprEvaluationRuntime uses shaded Guava")
   enableSuite[GlutenSubexpressionEliminationSuite]
   enableSuite[GlutenTimeWindowSuite]
   enableSuite[GlutenToPrettyStringSuite]
@@ -734,8 +737,9 @@ class VeloxTestSettings extends BackendTestSettings {
   enableSuite[GlutenLogicalPlanTagInSparkPlanSuite]
   enableSuite[GlutenOptimizeMetadataOnlyQuerySuite]
   enableSuite[GlutenPersistedViewTestSuite]
-  // TODO: 4.x enableSuite[GlutenPlannerSuite]  // 1 failure
-  // TODO: 4.x enableSuite[GlutenProjectedOrderingAndPartitioningSuite]  // 6 failures
+  disableSuite[GlutenPlannerSuite]("Validates Spark planner implementation details")
+  disableSuite[GlutenProjectedOrderingAndPartitioningSuite](
+    "Validates Spark planner output ordering and partitioning metadata")
   enableSuite[GlutenQueryPlanningTrackerEndToEndSuite]
   // TODO: 4.x enableSuite[GlutenRemoveRedundantProjectsSuite]  // 14 failures
   enableSuite[GlutenRemoveRedundantSortsSuite]
@@ -759,7 +763,8 @@ class VeloxTestSettings extends BackendTestSettings {
   enableSuite[GlutenUnsafeFixedWidthAggregationMapSuite]
   enableSuite[GlutenUnsafeKVExternalSorterSuite]
   enableSuite[GlutenUnsafeRowSerializerSuite]
-  // TODO: 4.x enableSuite[GlutenWholeStageCodegenSparkSubmitSuite]  // 1 failure
+  disableSuite[GlutenWholeStageCodegenSparkSubmitSuite](
+    "The SparkSubmit test launches Spark's main class without the Gluten plugin")
   enableSuite[GlutenWholeStageCodegenSuite]
     // Rewrite with Gluten-aware native whole-stage plan assertions.
     .exclude("range/filter should be combined")
@@ -839,9 +844,8 @@ class VeloxTestSettings extends BackendTestSettings {
     .exclude("CREATE TABLE USING AS SELECT based on the file without write permission")
     .exclude("create a table, drop it and create another one with the same name")
   enableSuite[GlutenDDLSourceLoadSuite]
-  enableSuite[GlutenDisableUnnecessaryBucketedScanWithoutHiveSupportSuite]
-    .disable(
-      "DISABLED: GLUTEN-4893 Vanilla UT checks scan operator by exactly matching the class type")
+  disableSuite[GlutenDisableUnnecessaryBucketedScanWithoutHiveSupportSuite](
+    "GLUTEN-4893: Vanilla UT checks scan operator by exactly matching the class type")
   enableSuite[GlutenDisableUnnecessaryBucketedScanWithoutHiveSupportSuiteAE]
   enableSuite[GlutenExternalCommandRunnerSuite]
   enableSuite[GlutenFilteredScanSuite]
